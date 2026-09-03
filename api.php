@@ -293,7 +293,7 @@ function llStatusEndpoint() {
             $nowPlaying['media'] = $fppStatus['current_sequence'];
         }
     }
-    return json([
+    return llJson([
         'success' => true,
         'settings' => $settings,
         'detection' => $detection,
@@ -309,7 +309,7 @@ function llDiagnosticsEndpoint() {
     $fppStatus = llGetFppStatus();
     $settings = llLoadSettings();
     $cmds = llBuildFfmpegCommand($settings, $detection);
-    return json([
+    return llJson([
         'success' => true,
         'detection' => $detection,
         'settings' => $settings,
@@ -321,9 +321,9 @@ function llDiagnosticsEndpoint() {
 function llNowPlayingEndpoint() {
     $fppStatus = llGetFppStatus();
     if ($fppStatus === null) {
-        return json(['success' => false, 'error' => 'Could not reach FPPD at http://localhost/api/fppd/status']);
+        return llJson(['success' => false, 'error' => 'Could not reach FPPD at http://localhost/api/fppd/status']);
     }
-    return json(['success' => true, 'status' => $fppStatus]);
+    return llJson(['success' => true, 'status' => $fppStatus]);
 }
 
 function llStreamEndpoint() {
@@ -331,7 +331,7 @@ function llStreamEndpoint() {
     $settings = llLoadSettings();
     if (empty($settings['enabled'])) {
         header('HTTP/1.1 503 Service Unavailable');
-        return json(['success' => false, 'error' => 'Listen Live is disabled in plugin settings.']);
+        return llJson(['success' => false, 'error' => 'Listen Live is disabled in plugin settings.']);
     }
 
     // Prevent caching
@@ -481,7 +481,7 @@ function llStreamEndpoint() {
 
 function llMediaStreamEndpoint() {
     // Direct media file streaming with optional seek: /api/plugin/fpp-ListenLive/media?file=xxx&seek=seconds
-    $file = $_GET['file'] ?? $_GET['media'] ?? param('file', null);
+    $file = $_GET['file'] ?? $_GET['media'] ?? llParam('file', null);
     // FPP router may pass file as path param: /media/<name>
     if (!$file && isset($_GET['file'])) $file = $_GET['file'];
     // Try to get from URI
@@ -493,7 +493,7 @@ function llMediaStreamEndpoint() {
     }
     // Also check FPP's param helper
     if (!$file) {
-        $file = param('file', param('media', null));
+        $file = llParam('file', llParam('media', null));
     }
 
     if (!$file) {
@@ -502,14 +502,14 @@ function llMediaStreamEndpoint() {
         $file = $fppStatus['current_song'] ?? $fppStatus['current_sequence'] ?? null;
         if (!$file) {
             header('HTTP/1.1 404 Not Found');
-            return json(['success' => false, 'error' => 'No file specified and nothing is currently playing']);
+            return llJson(['success' => false, 'error' => 'No file specified and nothing is currently playing']);
         }
     }
 
     $path = llGetMediaPath($file);
     if (!$path || !file_exists($path)) {
         header('HTTP/1.1 404 Not Found');
-        return json(['success' => false, 'error' => 'Media not found: ' . $file]);
+        return llJson(['success' => false, 'error' => 'Media not found: ' . $file]);
     }
 
     $seek = isset($_GET['seek']) ? (float)$_GET['seek'] : 0;
@@ -559,7 +559,7 @@ function llMediaStreamEndpoint() {
         $ffmpeg = llFindFfmpeg();
         $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . (int)$seek . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -f mp3 -';
         header('Content-Type: audio/mpeg');
-        headerRemove('Content-Length');
+        llHeaderRemove('Content-Length');
         set_time_limit(0);
         while (ob_get_level() > 0) @ob_end_clean();
         $handle = @popen($cmd . ' 2>/dev/null', 'r');
@@ -584,7 +584,7 @@ function llSaveEndpoint() {
         if (is_array($raw)) $data = $raw;
     }
     if (empty($data)) {
-        return json(['success' => false, 'error' => 'No data received']);
+        return llJson(['success' => false, 'error' => 'No data received']);
     }
     $existing = llLoadSettings();
     $allowed = ['enabled','source','bitrate','sample_rate','channels','alsa_device','pulse_source','volume','allow_remote'];
@@ -605,10 +605,10 @@ function llSaveEndpoint() {
     $clean['volume'] = max(0, min(200, (int)$clean['volume']));
 
     if (llSaveSettings($clean) === false) {
-        return json(['success' => false, 'error' => 'Could not write settings file. Check permissions.']);
+        return llJson(['success' => false, 'error' => 'Could not write settings file. Check permissions.']);
     }
     llLog('Settings saved: source=' . $clean['source'] . ' bitrate=' . $clean['bitrate']);
-    return json(['success' => true, 'message' => 'Settings saved', 'settings' => $clean]);
+    return llJson(['success' => true, 'message' => 'Settings saved', 'settings' => $clean]);
 }
 
 function llTestEndpoint() {
@@ -643,14 +643,14 @@ function llTestEndpoint() {
     }
     $allOk = true;
     foreach ($results as $r) if (!$r['ok']) $allOk = false;
-    return json(['success' => $allOk, 'results' => $results, 'detection' => $detection]);
+    return llJson(['success' => $allOk, 'results' => $results, 'detection' => $detection]);
 }
 
 function llIconEndpoint() {
     $iconFile = LL_PLUGIN_DIR . '/icon.png';
     if (!file_exists($iconFile)) {
         header('HTTP/1.0 404 Not Found');
-        return json(['error' => 'Icon not found']);
+        return llJson(['error' => 'Icon not found']);
     }
     $mtime = filemtime($iconFile);
     $etag = '"' . md5_file($iconFile) . '"';
@@ -669,9 +669,9 @@ function llIconEndpoint() {
 
 function llLogsEndpoint() {
     $logFile = LL_LOG_FILE;
-    if (!file_exists($logFile)) return json(['success' => true, 'entries' => []]);
+    if (!file_exists($logFile)) return llJson(['success' => true, 'entries' => []]);
     $fileLines = file($logFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-    if ($fileLines === false) return json(['success' => false, 'error' => 'Could not read log file.']);
+    if ($fileLines === false) return llJson(['success' => false, 'error' => 'Could not read log file.']);
     $fileLines = array_slice($fileLines, -100);
     $lines = [];
     foreach ($fileLines as $line) {
@@ -686,7 +686,7 @@ function llLogsEndpoint() {
             $lines[] = ['timestamp' => '', 'source' => '', 'level' => 'INFO', 'message' => $line];
         }
     }
-    return json(['success' => true, 'entries' => array_reverse($lines)]);
+    return llJson(['success' => true, 'entries' => array_reverse($lines)]);
 }
 
 function llCheckUpdatesEndpoint() {
@@ -699,7 +699,7 @@ function llCheckUpdatesEndpoint() {
         $remoteSha = $parts[0] ?? '';
     }
     $updateAvailable = !empty($localSha) && !empty($remoteSha) && $localSha !== $remoteSha;
-    return json(['updateAvailable' => $updateAvailable, 'localSha' => !empty($localSha) ? substr($localSha,0,7) : 'unknown', 'remoteSha' => !empty($remoteSha) ? substr($remoteSha,0,7) : 'unknown']);
+    return llJson(['updateAvailable' => $updateAvailable, 'localSha' => !empty($localSha) ? substr($localSha,0,7) : 'unknown', 'remoteSha' => !empty($remoteSha) ? substr($remoteSha,0,7) : 'unknown']);
 }
 
 function llUpdateEndpoint() {
@@ -734,7 +734,7 @@ function llUpdateEndpoint() {
     $opts = ['http' => ['method' => 'PUT', 'header' => 'Content-Type: application/json', 'content' => '1']];
     @file_get_contents('http://localhost/api/settings/restartFlag', false, stream_context_create($opts));
     llLog('Plugin updated');
-    return json(['success' => true, 'message' => 'Plugin updated']);
+    return llJson(['success' => true, 'message' => 'Plugin updated']);
 }
 
 function llReinstallEndpoint() {
@@ -752,37 +752,41 @@ function llUninstallEndpoint() {
     $opts = ['http' => ['method' => 'PUT', 'header' => 'Content-Type: application/json', 'content' => '1']];
     @file_get_contents('http://localhost/api/settings/restartFlag', false, stream_context_create($opts));
     llLog('Plugin uninstalled');
-    return json(['success' => true, 'message' => 'Plugin removed']);
+    return llJson(['success' => true, 'message' => 'Plugin removed']);
 }
 
 function llRestartFPPDEndpoint() {
     $opts = ['http' => ['method' => 'PUT', 'header' => 'Content-Type: application/json', 'content' => '1']];
     $result = @file_get_contents('http://localhost/api/settings/restartFlag', false, stream_context_create($opts));
-    if ($result === false) return json(['success' => false, 'error' => 'Could not set restart flag']);
-    return json(['success' => true, 'message' => 'FPPD restart flag set']);
+    if ($result === false) return llJson(['success' => false, 'error' => 'Could not set restart flag']);
+    return llJson(['success' => true, 'message' => 'FPPD restart flag set']);
 }
 
-// Helper for FPP's param() fallback
-if (!function_exists('param')) {
-    function param($key, $default = null) {
-        if (isset($_GET[$key])) return $_GET[$key];
-        if (isset($_POST[$key])) return $_POST[$key];
-        // Check URI segments for /endpoint/value style
-        $uri = $_SERVER['REQUEST_URI'] ?? '';
-        if (preg_match('#/' . preg_quote($key, '#') . '/([^/?]+)#', $uri, $m)) return urldecode($m[1]);
-        return $default;
+// Helpers that do NOT collide with FPP's reserved names (PluginApiFunctionConflicts scans for `function json`/`function param`)
+function llParam($key, $default = null) {
+    // Prefer FPP's native param() if it exists (limonade)
+    if (function_exists('param') && is_callable('param')) {
+        // Call FPP's param via indirection to avoid tokenizer seeing `param` definition
+        $fn = 'param';
+        return $fn($key, $default);
     }
+    if (isset($_GET[$key])) return $_GET[$key];
+    if (isset($_POST[$key])) return $_POST[$key];
+    $uri = $_SERVER['REQUEST_URI'] ?? '';
+    if (preg_match('#/' . preg_quote($key, '#') . '/([^/?]+)#', $uri, $m)) return urldecode($m[1]);
+    return $default;
 }
-if (!function_exists('json')) {
-    function json($data) {
-        header('Content-Type: application/json');
-        echo json_encode($data, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_IGNORE);
-        exit;
+function llJson($data) {
+    // Prefer FPP's native json() if available
+    if (function_exists('json') && is_callable('json')) {
+        $fn = 'json';
+        return $fn($data);
     }
+    header('Content-Type: application/json');
+    echo json_encode($data, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_IGNORE);
+    exit;
 }
-if (!function_exists('headerRemove')) {
-    function headerRemove($name) {
-        if (function_exists('header_remove')) header_remove($name);
-    }
+function llHeaderRemove($name) {
+    if (function_exists('header_remove')) header_remove($name);
 }
 ?>
