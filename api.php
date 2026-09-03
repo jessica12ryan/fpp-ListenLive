@@ -118,11 +118,50 @@ function llDetectAudioSources() {
 }
 
 function llGetFppStatus() {
-    $ctx = stream_context_create(['http' => ['timeout' => 3]]);
-    $json = @file_get_contents('http://localhost/api/fppd/status', false, $ctx);
-    if ($json === false) return null;
-    $data = json_decode($json, true);
-    return is_array($data) ? $data : null;
+    // Try multiple methods to reach FPPD — FPP's Apache on :80 proxies /api/fppd/status,
+    // but some installs need curl or direct 127.0.0.1 handling.
+    $urls = [
+        'http://localhost/api/fppd/status',
+        'http://127.0.0.1/api/fppd/status',
+        'http://localhost:32322/api/fppd/status',
+        'http://127.0.0.1:32322/api/fppd/status',
+    ];
+
+    // Prefer curl if available — more reliable than allow_url_fopen
+    if (function_exists('curl_init')) {
+        foreach ($urls as $url) {
+            $ch = curl_init($url);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 3);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2);
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, ['Accept: application/json']);
+            $json = @curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            // curl_close is no-op since PHP 8.0, avoid deprecated warning
+            if (function_exists('curl_close') && version_compare(PHP_VERSION, '8.0', '<')) {
+                @curl_close($ch);
+            }
+            if ($json !== false && $httpCode === 200 && $json !== '') {
+                $data = json_decode($json, true);
+                if (is_array($data)) return $data;
+            }
+        }
+    }
+
+    // Fallback: file_get_contents
+    foreach ($urls as $url) {
+        $ctx = stream_context_create(['http' => ['timeout' => 2, 'ignore_errors' => true, 'header' => "Accept: application/json\r\n"]]);
+        $json = @file_get_contents($url, false, $ctx);
+        if ($json !== false && $json !== '') {
+            $data = json_decode($json, true);
+            if (is_array($data)) return $data;
+        }
+    }
+
+    // Last resort: try reading FPP status via local file (some FPP versions cache it)
+    // or via fpp command line; return null if truly unreachable — caller should handle gracefully
+    return null;
 }
 
 function llGetMediaPath($mediaName) {

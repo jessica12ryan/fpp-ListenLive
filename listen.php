@@ -8,14 +8,17 @@
  * ## listen.php - Main player page                           ##
  * #############################################################
  */
-$pluginDir = __DIR__;
-$settingsFile = $pluginDir . '/config/settings.json';
-$settings = [];
-if (file_exists($settingsFile)) {
-    $settings = json_decode(@file_get_contents($settingsFile), true) ?: [];
+$llPluginDir = __DIR__;
+$llSettingsFile = $llPluginDir . '/config/settings.json';
+$llSettings = [];
+if (file_exists($llSettingsFile)) {
+    $llSettings = json_decode(@file_get_contents($llSettingsFile), true) ?: [];
 }
-$enabled = !empty($settings['enabled']) ? 1 : 0;
-$uiLevel = (int)($settings['uiLevel'] ?? $settings['uiLevel'] ?? 0);
+$enabled = !empty($llSettings['enabled']) ? 1 : 0;
+// Preserve FPP global $settings for UI level detection — do not overwrite it
+// FPP sets $settings from /home/fpp/media/settings; use that for tab visibility
+$_fppUiLevel = (int)($settings['uiLevel'] ?? $GLOBALS['settings']['uiLevel'] ?? 0);
+$uiLevel = $_fppUiLevel;
 $showLogsTab = $uiLevel >= 1;
 $showDevTab = $uiLevel >= 3;
 ?>
@@ -250,6 +253,7 @@ var llPlayer = {
                 var s = d.fpp_status || {};
                 var np = d.now_playing || {};
                 var settings = d.settings || {};
+                var fppdReachable = !!d.fpp_status;
 
                 // Badge based on FPP status
                 var statusName = (s.status_name || s.status || '').toString().toLowerCase();
@@ -272,25 +276,41 @@ var llPlayer = {
                     $('#ll_nowplaying').text(media);
                     $('#ll_elapsed').text((elapsed || '0') + (remaining ? ' / ' + remaining : ''));
                 }
-                $('#ll_playlist').text(s.current_playlist || np.current_playlist || '—');
-                $('#ll_sequence').text(s.current_sequence || '—');
+                $('#ll_playlist').text(s.current_playlist || np.current_playlist || (fppdReachable ? '—' : '— (FPPD not reachable)'));
+                $('#ll_sequence').text(s.current_sequence || (fppdReachable ? '—' : '— (FPPD not reachable)'));
                 $('#ll_src').text(settings.source || 'auto');
                 $('#ll_bitrate').text(settings.bitrate || '128k');
+
+                if (!fppdReachable && !llPlayer.isPlaying) {
+                    // FPPD unreachable — don't block streaming, but warn that Now Playing is unavailable
+                    $('#ll_nowplaying').html('<span class="text-warning">FPPD not reachable — live capture still works, but Now Playing is unavailable. Check FPPD is running.</span>');
+                }
 
                 if (!settings.enabled) {
                     $('#ll_status_text').html('<span class="text-danger">Plugin disabled — enable in Config tab</span>');
                 } else if (llPlayer.isPlaying) {
-                    $('#ll_status_text').html('<span class="text-success">● Streaming live audio</span>');
+                    $('#ll_status_text').html('<span class="text-success">● Streaming live audio</span>' + (fppdReachable ? '' : ' <span class="text-warning" style="font-size:12px;">(FPPD unreachable)</span>'));
                 } else {
-                    if (isPlaying) {
+                    if (!fppdReachable) {
+                        $('#ll_status_text').html('<span class="text-warning">FPPD not reachable — click Play to try live capture anyway (Now Playing unavailable)</span>');
+                    } else if (isPlaying) {
                         $('#ll_status_text').html('<span class="text-warning">FPP is playing — click Play to listen</span>');
                     } else {
                         $('#ll_status_text').html('<span class="text-secondary">FPP is idle — start a playlist to hear audio</span>');
                     }
                 }
             },
-            error: function() {
-                $('#ll_status_text').html('<span class="text-danger">Could not reach FPPD</span>');
+            error: function(xhr) {
+                var msg = 'Could not reach plugin API';
+                try {
+                    var r = JSON.parse(xhr.responseText);
+                    if (r.error) msg += ': ' + r.error;
+                    else if (xhr.status) msg += ' (HTTP ' + xhr.status + ')';
+                } catch(e) {
+                    if (xhr.status) msg += ' (HTTP ' + xhr.status + ')';
+                }
+                $('#ll_status_text').html('<span class="text-danger">' + escHtml(msg) + ' — check FPP logs at /home/fpp/media/logs/plugin-fpp-ListenLive.log</span>');
+                $('#ll_stream_info').html('<span class="text-danger">' + escHtml(msg) + '</span>');
             }
         });
     },

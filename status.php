@@ -8,12 +8,14 @@
  * ## status.php                                              ##
  * #############################################################
  */
-$pluginDir = __DIR__;
-$settingsFile = $pluginDir . '/config/settings.json';
-$settings = [];
-if (file_exists($settingsFile)) $settings = json_decode(@file_get_contents($settingsFile), true) ?: [];
-$enabled = !empty($settings['enabled']) ? 1 : 0;
-$uiLevel = (int)($settings['uiLevel'] ?? 0);
+$llPluginDir = __DIR__;
+$llSettingsFile = $llPluginDir . '/config/settings.json';
+$llSettings = [];
+if (file_exists($llSettingsFile)) $llSettings = json_decode(@file_get_contents($llSettingsFile), true) ?: [];
+$enabled = !empty($llSettings['enabled']) ? 1 : 0;
+// Preserve FPP global $settings for tab visibility
+$_fppUiLevel = (int)($GLOBALS['settings']['uiLevel'] ?? $settings['uiLevel'] ?? 0);
+$uiLevel = $_fppUiLevel;
 $showLogsTab = $uiLevel >= 1;
 $showDevTab = $uiLevel >= 3;
 ?>

@@ -8,8 +8,8 @@
  * ## config.php                                              ##
  * #############################################################
  */
-$pluginDir = __DIR__;
-$settingsFile = $pluginDir . '/config/settings.json';
+$llPluginDir = __DIR__;
+$llSettingsFile = $llPluginDir . '/config/settings.json';
 
 $defaults = [
     'enabled' => 1,
@@ -21,14 +21,23 @@ $defaults = [
     'pulse_source' => 'auto',
     'volume' => 100
 ];
-$settings = $defaults;
-if (file_exists($settingsFile)) {
-    $s = json_decode(@file_get_contents($settingsFile), true);
-    if (is_array($s)) $settings = array_merge($defaults, $s);
+$llSettings = $defaults;
+if (file_exists($llSettingsFile)) {
+    $s = json_decode(@file_get_contents($llSettingsFile), true);
+    if (is_array($s)) $llSettings = array_merge($defaults, $s);
 }
-$uiLevel = (int)($settings['uiLevel'] ?? 0);
+// Do NOT overwrite FPP global $settings — keep it for UI level detection
+// Tabs.inc will read $GLOBALS['settings']['uiLevel'] correctly
+$_fppUiLevel = (int)($GLOBALS['settings']['uiLevel'] ?? 0);
+if ($_fppUiLevel === 0 && isset($settings['uiLevel'])) {
+    $_fppUiLevel = (int)$settings['uiLevel'];
+}
+$uiLevel = $_fppUiLevel;
 $showLogsTab = $uiLevel >= 1;
 $showDevTab = $uiLevel >= 3;
+// Provide $settings alias for existing HTML that expects plugin settings in $settings
+// But also keep $llSettings authoritative; HTML below will be updated to use $llSettings
+$settings = $llSettings;
 ?>
 <style>
 @media only screen and (max-width: 480px) {
