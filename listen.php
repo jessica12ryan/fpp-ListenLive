@@ -155,8 +155,30 @@ var llPlayer = {
         llPlayer.audio.addEventListener('error', function() {
             var err = llPlayer.audio.error;
             var code = err ? err.code : 0;
+            var msg = 'Stream error (code ' + code + ')';
+            if (code === 4) msg += ' — source returned no audio or unsupported format';
+            if (code === 2) msg += ' — network error';
+            if (code === 3) msg += ' — decoding failed';
             $('#ll_badge').removeClass('ll-badge-live ll-badge-idle').addClass('ll-badge-warn').text('Error');
-            $('#ll_status_text').html('<span class="text-danger">Stream error (code ' + code + '). Retrying...</span>');
+            $('#ll_status_text').html('<span class="text-danger">' + escHtml(msg) + '. Checking diagnostics...</span>');
+            // Fetch diagnostics to show helpful hint
+            $.ajax({
+                url: 'api/plugin/fpp-ListenLive/diagnostics',
+                type: 'GET',
+                dataType: 'json',
+                success: function(d) {
+                    var hint = '';
+                    if (d.fallback_media && !d.fallback_media.path && !d.fallback_media.streamUrl) {
+                        hint = ' — no media found (' + escHtml(d.fallback_media.type + ': ' + d.fallback_media.media) + ')';
+                    } else if (!d.detection || !d.detection.ffmpeg) {
+                        hint = ' — ffmpeg missing';
+                    } else if (!d.detection.pipewire && !d.detection.pulse && !d.detection.alsa) {
+                        hint = ' — no capture devices detected';
+                    }
+                    $('#ll_status_text').html('<span class="text-danger">' + escHtml(msg) + hint + '</span> <span class="text-secondary" style="font-size:12px;">Check Diagnostics & Logs tabs for details. Will retry...</span>');
+                },
+                error: function() {}
+            });
             // Auto reconnect after 3s if we were playing
             if (llPlayer.isPlaying) {
                 setTimeout(function() { llPlayer.reconnect(); }, 3000);
@@ -254,49 +276,73 @@ var llPlayer = {
                 var np = d.now_playing || {};
                 var settings = d.settings || {};
                 var fppdReachable = !!d.fpp_status;
+                var isBackgroundPlaying = !!(d.fallback_media && (d.fallback_media.type === 'background' || d.fallback_media.type === 'afterhours'));
 
-                // Badge based on FPP status
+                // Badge based on FPP status + background/after-hours
                 var statusName = (s.status_name || s.status || '').toString().toLowerCase();
                 var isPlaying = statusName.indexOf('playing') !== -1 || statusName.indexOf('active') !== -1;
+                if (isBackgroundPlaying) isPlaying = true;
                 if (!llPlayer.isPlaying) {
                     if (isPlaying) {
-                        $('#ll_badge').removeClass('ll-badge-idle ll-badge-live ll-badge-warn').addClass('ll-badge-warn').text('FPP Playing');
+                        var label = isBackgroundPlaying && !s.current_song ? 'Background Playing' : 'FPP Playing';
+                        $('#ll_badge').removeClass('ll-badge-idle ll-badge-live ll-badge-warn').addClass('ll-badge-warn').text(label);
                     } else {
                         $('#ll_badge').removeClass('ll-badge-live ll-badge-warn').addClass('ll-badge-idle').text('Idle');
                     }
                 }
-                // Now playing
+                // Now playing — also check background/after-hours when FPP idle
                 var media = s.current_song || s.current_sequence || s.current_playlist || '';
                 if (typeof media === 'object') media = JSON.stringify(media);
+                // Fallback to background/after-hours media when FPP idle
+                if ((!media || media === 'false' || media === '') && d.fallback_media && d.fallback_media.media) {
+                    media = d.fallback_media.media + ' (' + d.fallback_media.type + ')';
+                    if (d.fallback_media.type === 'background') isBackgroundPlaying = true;
+                    if (d.fallback_media.type === 'afterhours') isBackgroundPlaying = true;
+                }
                 if (!media || media === 'false' || media === '') {
                     $('#ll_nowplaying').html('<span class="text-secondary">Nothing playing — FPP is idle</span>');
+                    $('#ll_elapsed').text('—');
                 } else {
                     var elapsed = s.seconds_elapsed || s.time_elapsed || np.seconds_elapsed || 0;
                     var remaining = s.seconds_remaining || s.time_remaining || '';
                     $('#ll_nowplaying').text(media);
                     $('#ll_elapsed').text((elapsed || '0') + (remaining ? ' / ' + remaining : ''));
+                    if (isBackgroundPlaying && !s.current_song) {
+                        $('#ll_nowplaying').html(escHtml(media) + ' <span class="ll-badge" style="background:#198754;color:#fff;font-size:11px;">via ' + escHtml(d.fallback_media.type) + '</span>');
+                    }
                 }
-                $('#ll_playlist').text(s.current_playlist || np.current_playlist || (fppdReachable ? '—' : '— (FPPD not reachable)'));
-                $('#ll_sequence').text(s.current_sequence || (fppdReachable ? '—' : '— (FPPD not reachable)'));
+                // Also show background status in playlist/sequence when idle
+                var bgPlaylist = (d.background_status && (d.background_status.playlist || d.background_status.backgroundMusicPlaylist)) || '';
+                if (!s.current_playlist && bgPlaylist) {
+                    $('#ll_playlist').text(bgPlaylist + ' (BackgroundMusic)');
+                } else {
+                    $('#ll_playlist').text(s.current_playlist || np.current_playlist || (fppdReachable ? '—' : '— (FPPD not reachable)'));
+                }
+                if (!s.current_sequence && isBackgroundPlaying) {
+                    $('#ll_sequence').text('— (background active)');
+                } else {
+                    $('#ll_sequence').text(s.current_sequence || (fppdReachable ? '—' : '— (FPPD not reachable)'));
+                }
                 $('#ll_src').text(settings.source || 'auto');
                 $('#ll_bitrate').text(settings.bitrate || '128k');
 
-                if (!fppdReachable && !llPlayer.isPlaying) {
-                    // FPPD unreachable — don't block streaming, but warn that Now Playing is unavailable
+                if (!fppdReachable && !llPlayer.isPlaying && !isBackgroundPlaying) {
                     $('#ll_nowplaying').html('<span class="text-warning">FPPD not reachable — live capture still works, but Now Playing is unavailable. Check FPPD is running.</span>');
                 }
 
                 if (!settings.enabled) {
                     $('#ll_status_text').html('<span class="text-danger">Plugin disabled — enable in Config tab</span>');
                 } else if (llPlayer.isPlaying) {
-                    $('#ll_status_text').html('<span class="text-success">● Streaming live audio</span>' + (fppdReachable ? '' : ' <span class="text-warning" style="font-size:12px;">(FPPD unreachable)</span>'));
+                    $('#ll_status_text').html('<span class="text-success">● Streaming live audio</span>' + (fppdReachable ? '' : ' <span class="text-warning" style="font-size:12px;">(FPPD unreachable)</span>') + (isBackgroundPlaying ? ' <span class="text-secondary" style="font-size:12px;">(background)</span>' : ''));
                 } else {
-                    if (!fppdReachable) {
+                    if (!fppdReachable && !isBackgroundPlaying) {
                         $('#ll_status_text').html('<span class="text-warning">FPPD not reachable — click Play to try live capture anyway (Now Playing unavailable)</span>');
+                    } else if (isBackgroundPlaying) {
+                        $('#ll_status_text').html('<span class="text-success">Background music active — click Play to listen</span>');
                     } else if (isPlaying) {
                         $('#ll_status_text').html('<span class="text-warning">FPP is playing — click Play to listen</span>');
                     } else {
-                        $('#ll_status_text').html('<span class="text-secondary">FPP is idle — start a playlist to hear audio</span>');
+                        $('#ll_status_text').html('<span class="text-secondary">FPP is idle — start a playlist or background music to hear audio</span>');
                     }
                 }
             },
@@ -323,12 +369,22 @@ var llPlayer = {
             success: function(d) {
                 var det = d.detection || {};
                 var html = '<table class="fppTable" style="width:auto;">';
-                html += '<tr><td style="padding:4px;"><b>FFmpeg:</b></td><td style="padding:4px;">' + (det.ffmpeg ? '<span class="text-success">Yes</span> (' + escHtml(det.ffmpeg_path) + ')' : '<span class="text-danger">Not found</span> — install ffmpeg') + '</td></tr>';
-                html += '<tr><td style="padding:4px;"><b>PulseAudio:</b></td><td style="padding:4px;">' + (det.pulse ? '<span class="text-success">Available</span>' : '<span class="text-secondary">Not detected</span>') + (det.pulse_sources && det.pulse_sources.length ? ' <span class="text-secondary">(' + escHtml(det.pulse_sources.join(', ')) + ')</span>' : '') + '</td></tr>';
-                html += '<tr><td style="padding:4px;"><b>ALSA:</b></td><td style="padding:4px;">' + (det.alsa ? '<span class="text-success">Available</span>' : '<span class="text-secondary">Not detected</span>') + (det.alsa_devices && det.alsa_devices.length ? ' <span class="text-secondary">(' + escHtml(det.alsa_devices.slice(0,3).join(', ')) + ')</span>' : '') + '</td></tr>';
+                html += '<tr><td style="padding:4px;"><b>FFmpeg:</b></td><td style="padding:4px;">' + (det.ffmpeg ? '<span class="text-success">Yes</span> (' + escHtml(det.ffmpeg_path) + (det.ffmpeg_pipewire ? ', pipewire demuxer' : '') + ')' : '<span class="text-danger">Not found</span> — install ffmpeg') + '</td></tr>';
+                html += '<tr><td style="padding:4px;"><b>PipeWire:</b></td><td style="padding:4px;">' + (det.pipewire ? '<span class="text-success">Available</span>' : '<span class="text-secondary">Not detected</span>') + (det.pipewire_sources && det.pipewire_sources.length ? ' <span class="text-secondary">(' + escHtml(det.pipewire_sources.slice(0,2).join(', ')) + ')</span>' : '') + '</td></tr>';
+                html += '<tr><td style="padding:4px;"><b>PulseAudio:</b></td><td style="padding:4px;">' + (det.pulse ? '<span class="text-success">Available</span> <span class="text-secondary">(pipewire-pulse compat)</span>' : '<span class="text-secondary">Not detected</span>') + (det.pulse_sources && det.pulse_sources.length ? ' <span class="text-secondary">(' + escHtml(det.pulse_sources.slice(0,2).join(', ')) + ')</span>' : '') + '</td></tr>';
+                html += '<tr><td style="padding:4px;"><b>ALSA:</b></td><td style="padding:4px;">' + (det.alsa ? '<span class="text-success">Available</span>' : '<span class="text-secondary">Not detected</span>') + (det.alsa_devices && det.alsa_devices.length ? ' <span class="text-secondary">(' + escHtml(det.alsa_devices.slice(0,2).join(', ')) + ')</span>' : '') + '</td></tr>';
+                if (d.fallback_media) {
+                    var fm = d.fallback_media;
+                    html += '<tr><td style="padding:4px;"><b>Fallback media:</b></td><td style="padding:4px;">' + escHtml(fm.type + ': ' + fm.media) + (fm.path ? ' <span class="text-success">(' + escHtml(fm.path) + ')</span>' : ' <span class="text-danger">(not found)</span>') + '</td></tr>';
+                }
+                if (d.background_status) html += '<tr><td style="padding:4px;"><b>BackgroundMusic:</b></td><td style="padding:4px;"><span class="text-success">Plugin responding</span></td></tr>';
+                if (d.afterhours_status) html += '<tr><td style="padding:4px;"><b>AfterHours:</b></td><td style="padding:4px;"><span class="text-success">Plugin responding</span></td></tr>';
                 html += '<tr><td style="padding:4px;"><b>Stream URL:</b></td><td style="padding:4px;"><code>api/plugin/fpp-ListenLive/stream</code> <a href="api/plugin/fpp-ListenLive/stream" target="_blank" style="margin-left:8px;">Open directly</a></td></tr>';
                 if (!det.ffmpeg) {
                     html += '<tr><td colspan="2" style="padding:8px;"><span class="text-warning">FFmpeg is required for live capture. Install via FPP OS or <code>sudo apt install ffmpeg</code>. File-sync fallback will be used until then.</span></td></tr>';
+                }
+                if (d.fpp_reachable === false) {
+                    html += '<tr><td colspan="2" style="padding:8px;"><span class="text-warning">FPPD not reachable — live Now Playing unavailable, but live capture and file-sync may still work.</span></td></tr>';
                 }
                 html += '</table>';
                 $('#ll_stream_info').html(html);

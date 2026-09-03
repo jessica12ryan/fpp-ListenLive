@@ -61,8 +61,11 @@ function llDetectAudioSources() {
     $result = [
         'ffmpeg' => false,
         'ffmpeg_path' => '',
+        'ffmpeg_pipewire' => false,
         'pulse' => false,
         'pulse_sources' => [],
+        'pipewire' => false,
+        'pipewire_sources' => [],
         'alsa' => false,
         'alsa_devices' => []
     ];
@@ -72,19 +75,99 @@ function llDetectAudioSources() {
     if ($ver && stripos($ver, 'ffmpeg version') !== false) {
         $result['ffmpeg'] = true;
     }
-    // Pulse
+    // Check ffmpeg pipewire demuxer support
+    $fmts = @shell_exec(escapeshellarg($ffmpeg) . ' -formats 2>&1 | grep -i pipewire');
+    if ($fmts && stripos($fmts, 'pipewire') !== false) {
+        $result['ffmpeg_pipewire'] = true;
+    }
+    // PipeWire detection — FPP 9+ uses PipeWire, pactl is pipewire-pulse compat
+    // Try FPP's own PipeWire API first (most reliable on FPP)
+    $pipewireApiUrls = [
+        'http://localhost/api/pipewire/audio/sources',
+        'http://127.0.0.1/api/pipewire/audio/sources',
+        'http://localhost/api/pipewire/audio/plugin-sources',
+        'http://127.0.0.1/api/pipewire/audio/plugin-sources',
+        'http://localhost/api/pipewire/audio/sinks',
+        'http://127.0.0.1/api/pipewire/audio/sinks',
+    ];
+    foreach ($pipewireApiUrls as $url) {
+        $json = null;
+        if (function_exists('curl_init')) {
+            $ch = curl_init($url);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 2);
+            $tmp = @curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            if ($tmp !== false && $code === 200 && $tmp !== '') {
+                $json = $tmp;
+            }
+        } else {
+            $ctx = stream_context_create(['http' => ['timeout' => 2]]);
+            $tmp = @file_get_contents($url, false, $ctx);
+            if ($tmp !== false && $tmp !== '') $json = $tmp;
+        }
+        if ($json) {
+            $data = json_decode($json, true);
+            if (is_array($data) && !empty($data)) {
+                $result['pipewire'] = true;
+                // Flatten any source names
+                foreach ($data as $item) {
+                    if (is_string($item)) $result['pipewire_sources'][] = $item;
+                    elseif (is_array($item) && isset($item['name'])) $result['pipewire_sources'][] = $item['name'];
+                    elseif (is_array($item) && isset($item['nodeName'])) $result['pipewire_sources'][] = $item['nodeName'];
+                }
+                break;
+            }
+        }
+    }
+    // Fallback: check pipewire runtime / tools
+    if (!$result['pipewire']) {
+        $pwCheck = @shell_exec('which pw-cli 2>/dev/null; which wpctl 2>/dev/null; ls /run/user/*/pipewire-0 2>/dev/null | head -1');
+        if ($pwCheck && (strpos($pwCheck, 'pw-cli') !== false || strpos($pwCheck, 'wpctl') !== false || strpos($pwCheck, 'pipewire-0') !== false)) {
+            $result['pipewire'] = true;
+        }
+        // pactl info will say PipeWire when pipewire-pulse is active
+        $info = @shell_exec('pactl info 2>&1');
+        if ($info && stripos($info, 'PipeWire') !== false) {
+            $result['pipewire'] = true;
+            $result['pulse'] = true; // pipewire-pulse provides pulse compat
+        }
+        // wpctl status or pw-cli
+        $wpctl = trim(@shell_exec('wpctl status 2>&1 | head -20') ?? '');
+        if ($wpctl && stripos($wpctl, 'PipeWire') !== false) {
+            $result['pipewire'] = true;
+        }
+    }
+    // Pulse (pipewire-pulse or real pulse)
     $pactl = trim(@shell_exec('pactl list short sources 2>/dev/null') ?? '');
     if ($pactl !== '') {
         $result['pulse'] = true;
         foreach (explode("\n", $pactl) as $line) {
             $parts = preg_split('/\s+/', trim($line));
-            if (!empty($parts[1])) $result['pulse_sources'][] = $parts[1];
+            if (!empty($parts[1])) {
+                $result['pulse_sources'][] = $parts[1];
+                // Also consider pulse monitor sources as pipewire sources when pipewire is active
+                if ($result['pipewire'] && strpos($parts[1], '.monitor') !== false && !in_array($parts[1], $result['pipewire_sources'])) {
+                    $result['pipewire_sources'][] = $parts[1];
+                }
+            }
         }
     } else {
         // Check if pulse is running via pactl info
         $info = @shell_exec('pactl info 2>&1');
         if ($info && strpos($info, 'Server String') !== false) {
             $result['pulse'] = true;
+        }
+    }
+    // Also try pw-cli dump for pipewire sources if still empty
+    if ($result['pipewire'] && empty($result['pipewire_sources'])) {
+        $dump = @shell_exec('pw-dump 2>/dev/null | grep -o "\"name\":[^,]*\.monitor[^,]*" | head -5');
+        if ($dump) {
+            foreach (explode("\n", $dump) as $line) {
+                if (preg_match('/"name":\s*"([^"]+\.monitor[^"]*)"/', $line, $m)) {
+                    $result['pipewire_sources'][] = $m[1];
+                }
+            }
         }
     }
     // ALSA
@@ -114,6 +197,10 @@ function llDetectAudioSources() {
             }
         }
     }
+    // Deduplicate
+    $result['pulse_sources'] = array_values(array_unique($result['pulse_sources']));
+    $result['pipewire_sources'] = array_values(array_unique($result['pipewire_sources']));
+    $result['alsa_devices'] = array_values(array_unique($result['alsa_devices']));
     return $result;
 }
 
@@ -164,6 +251,142 @@ function llGetFppStatus() {
     return null;
 }
 
+function llGetBackgroundMusicStatus() {
+    $urls = [
+        'http://localhost/api/plugin/fpp-plugin-BackgroundMusic/status',
+        'http://127.0.0.1/api/plugin/fpp-plugin-BackgroundMusic/status',
+        'http://localhost/api/plugin/BackgroundMusic/status',
+        'http://127.0.0.1/api/plugin/BackgroundMusic/status',
+    ];
+    foreach ($urls as $url) {
+        $json = null;
+        if (function_exists('curl_init')) {
+            $ch = curl_init($url);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 2);
+            $tmp = @curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            if ($tmp !== false && $code === 200 && $tmp !== '' && $tmp[0] === '{') {
+                $json = $tmp;
+            }
+        } else {
+            $ctx = stream_context_create(['http' => ['timeout' => 2]]);
+            $tmp = @file_get_contents($url, false, $ctx);
+            if ($tmp !== false && $tmp !== '' && $tmp[0] === '{') $json = $tmp;
+        }
+        if ($json) {
+            $data = json_decode($json, true);
+            if (is_array($data)) return $data;
+        }
+    }
+    return null;
+}
+
+function llGetAfterHoursStatus() {
+    $urls = [
+        'http://localhost/api/plugin/fpp-after-hours/getDetails',
+        'http://127.0.0.1/api/plugin/fpp-after-hours/getDetails',
+    ];
+    foreach ($urls as $url) {
+        $json = null;
+        if (function_exists('curl_init')) {
+            $ch = curl_init($url);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 2);
+            $tmp = @curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            if ($tmp !== false && $code === 200 && $tmp !== '' && $tmp[0] === '{') {
+                $json = $tmp;
+            }
+        } else {
+            $ctx = stream_context_create(['http' => ['timeout' => 2]]);
+            $tmp = @file_get_contents($url, false, $ctx);
+            if ($tmp !== false && $tmp !== '' && $tmp[0] === '{') $json = $tmp;
+        }
+        if ($json) {
+            $data = json_decode($json, true);
+            if (is_array($data)) return $data;
+        }
+    }
+    return null;
+}
+
+function llGetFallbackMedia() {
+    // Returns [ 'path' => ..., 'type' => 'fpp'|'background'|'afterhours', 'info' => ... ] or null
+    // 1) FPP current song/sequence
+    $fppStatus = llGetFppStatus();
+    if ($fppStatus) {
+        $media = $fppStatus['current_song'] ?? $fppStatus['current_sequence'] ?? null;
+        if ($media && is_string($media) && $media !== '' && $media !== 'false') {
+            $path = llGetMediaPath($media);
+            if ($path && file_exists($path)) {
+                return ['path' => $path, 'type' => 'fpp', 'media' => $media, 'elapsed' => (float)($fppStatus['seconds_elapsed'] ?? 0)];
+            }
+            // Even if file not found, return media name for diagnostics
+            return ['path' => null, 'type' => 'fpp', 'media' => $media, 'elapsed' => (float)($fppStatus['seconds_elapsed'] ?? 0)];
+        }
+    }
+    // 2) BackgroundMusic plugin — check if it is playing
+    $bg = llGetBackgroundMusicStatus();
+    if ($bg) {
+        // Try various field names used by different versions
+        $candidates = [];
+        // Common fields: currentTrack, currentSong, track, nowPlaying, currentMedia
+        foreach (['currentTrack','currentSong','current_track','track','nowPlaying','currentMedia','playingTrack'] as $k) {
+            if (isset($bg[$k]) && is_string($bg[$k]) && $bg[$k] !== '') $candidates[] = $bg[$k];
+            if (isset($bg['data'][$k]) && is_string($bg['data'][$k]) && $bg['data'][$k] !== '') $candidates[] = $bg['data'][$k];
+        }
+        // Also check nested status objects
+        if (isset($bg['status']) && is_array($bg['status'])) {
+            foreach (['currentTrack','track'] as $k) if (isset($bg['status'][$k]) && is_string($bg['status'][$k])) $candidates[] = $bg['status'][$k];
+        }
+        // Check isPlaying flag
+        $isPlaying = false;
+        foreach (['isPlaying','playing','running','backgroundMusicRunning','isRunning'] as $k) {
+            if (!empty($bg[$k])) $isPlaying = true;
+            if (!empty($bg['data'][$k])) $isPlaying = true;
+        }
+        foreach ($candidates as $media) {
+            $path = llGetMediaPath($media);
+            if ($path && file_exists($path)) {
+                return ['path' => $path, 'type' => 'background', 'media' => $media, 'elapsed' => 0, 'bgStatus' => $bg];
+            }
+        }
+        // If bg says playing but we couldn't find file, return bg status for diagnostics
+        if ($isPlaying || !empty($candidates)) {
+            return ['path' => null, 'type' => 'background', 'media' => $candidates[0] ?? 'unknown', 'bgStatus' => $bg];
+        }
+        // Also check if bg has playlist details with current index
+        if (isset($bg['playlistDetails']) || isset($bg['tracks'])) {
+            return ['path' => null, 'type' => 'background', 'media' => 'background playlist', 'bgStatus' => $bg];
+        }
+    }
+    // 3) After-hours plugin — internet stream (not local file)
+    $ah = llGetAfterHoursStatus();
+    if ($ah) {
+        // Check if after-hours is active
+        $isActive = false;
+        if (!empty($ah['isPlaying']) || !empty($ah['playing']) || !empty($ah['status'])) {
+            // getDetails returns status:true and data array when streams configured
+            if (isset($ah['data']) && is_array($ah['data']) && !empty($ah['data'])) $isActive = true;
+            if (isset($ah['isPlaying']) && $ah['isPlaying']) $isActive = true;
+        }
+        // Also check direct fields
+        if (isset($ah['data']) && is_array($ah['data'])) {
+            foreach ($ah['data'] as $stream) {
+                if (isset($stream['url']) || isset($stream['streamUrl'])) {
+                    $url = $stream['url'] ?? $stream['streamUrl'];
+                    if ($url) return ['path' => null, 'type' => 'afterhours', 'media' => $url, 'ahStatus' => $ah, 'streamUrl' => $url];
+                }
+            }
+        }
+        if ($isActive) {
+            return ['path' => null, 'type' => 'afterhours', 'media' => 'after-hours stream', 'ahStatus' => $ah];
+        }
+    }
+    return null;
+}
+
 function llGetMediaPath($mediaName) {
     // FPP stores media in /home/fpp/media/music or /home/fpp/media/videos
     $bases = [
@@ -196,43 +419,75 @@ function llBuildFfmpegCommand($settings, $detection) {
 
     $source = $settings['source'] ?? 'auto';
 
-    // Build ordered attempts
+    // Build ordered attempts — prioritize PipeWire (FPP 9+), then Pulse, then ALSA
     $attempts = [];
-    if ($source === 'pulse' || $source === 'auto') {
-        if ($detection['pulse']) {
+
+    // Helper to wrap ffmpeg with environment for pipewire/pulse socket access
+    // FPP runs as user 'fpp', apache/php-fpm also as 'fpp', but ensure XDG_RUNTIME_DIR
+    $envPrefix = '';
+    // Try to set PULSE_SERVER / PIPEWIRE runtime if needed — pulse sometimes needs XDG_RUNTIME_DIR
+    $xdg = trim(@shell_exec('echo $XDG_RUNTIME_DIR 2>/dev/null') ?? '');
+    if ($xdg === '') {
+        // Common FPP runtime dir
+        if (is_dir('/run/user/1000')) $envPrefix = 'XDG_RUNTIME_DIR=/run/user/1000 ';
+        elseif (is_dir('/run/user/512')) $envPrefix = 'XDG_RUNTIME_DIR=/run/user/512 ';
+    }
+    // If we can sudo to fpp, that ensures correct pulse/pipewire perms (harmless if already fpp)
+    $canSudoFpp = trim(@shell_exec('sudo -n -u fpp true 2>&1 && echo yes') ?? '') === 'yes';
+    $sudoPrefix = $canSudoFpp ? 'sudo -u fpp ' : '';
+
+    if ($source === 'auto' || $source === 'pulse' || $source === 'pipewire') {
+        // PipeWire first (native or via pulse compat)
+        if (!empty($detection['pipewire'])) {
+            // Prefer explicit monitor sources from detection (pipewire_sources includes .monitor)
+            foreach ($detection['pipewire_sources'] as $src) {
+                if (strpos($src, '.monitor') !== false) {
+                    $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($src), 'pipewire-pulse:' . $src];
+                    break; // just the first monitor is usually the right sink
+                }
+            }
+            // If no monitor found, try generic pipewire pulse
+            $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i default', 'pipewire-pulse:default'];
+            // Try native pipewire demuxer if ffmpeg supports it
+            if (!empty($detection['ffmpeg_pipewire']) && !empty($detection['pipewire_sources'])) {
+                foreach (array_slice($detection['pipewire_sources'], 0, 1) as $src) {
+                    $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pipewire -i ' . escapeshellarg($src), 'pipewire:' . $src];
+                }
+            }
+        }
+        // Then Pulse
+        if (!empty($detection['pulse'])) {
             $ps = $settings['pulse_source'] ?? 'auto';
             if ($ps === 'auto') {
-                // Try monitor sources first
                 $monitor = null;
                 foreach ($detection['pulse_sources'] as $s) {
                     if (strpos($s, '.monitor') !== false) { $monitor = $s; break; }
                 }
                 if ($monitor) {
-                    $attempts[] = [$ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($monitor), 'pulse:' . $monitor];
+                    $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($monitor), 'pulse:' . $monitor];
                 }
-                // fallback to default pulse
-                $attempts[] = [$ffmpeg . ' -hide_banner -loglevel error -f pulse -i default', 'pulse:default'];
+                $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i default', 'pulse:default'];
             } else {
-                $attempts[] = [$ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($ps), 'pulse:' . $ps];
+                $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($ps), 'pulse:' . $ps];
             }
         } elseif ($source === 'auto') {
-            // still try default pulse even if detection says no - ffmpeg will fail fast
-            $attempts[] = [$ffmpeg . ' -hide_banner -loglevel error -f pulse -i default', 'pulse:default'];
+            $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i default', 'pulse:default'];
         }
     }
     if ($source === 'alsa' || $source === 'auto') {
         $alsaDev = $settings['alsa_device'] ?? 'default';
-        $attempts[] = [$ffmpeg . ' -hide_banner -loglevel error -f alsa -i ' . escapeshellarg($alsaDev), 'alsa:' . $alsaDev];
+        $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i ' . escapeshellarg($alsaDev), 'alsa:' . $alsaDev];
         if ($alsaDev !== 'default') {
-            $attempts[] = [$ffmpeg . ' -hide_banner -loglevel error -f alsa -i default', 'alsa:default'];
+            $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i default', 'alsa:default'];
         }
         if ($alsaDev !== 'hw:0,0') {
-            $attempts[] = [$ffmpeg . ' -hide_banner -loglevel error -f alsa -i hw:0,0', 'alsa:hw:0,0'];
+            $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i hw:0,0', 'alsa:hw:0,0'];
         }
+        // Also try plughw and Loopback for snd-aloop capture
+        $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i hw:Loopback,1,0', 'alsa:Loopback'];
     }
-    // Always add silent fallback if everything else fails - generate silence so stream doesn't die,
-    // but we will prefer file sync; this is last resort
-    $attempts[] = [$ffmpeg . ' -hide_banner -loglevel error -f lavfi -i anullsrc=r=' . $sr . ':cl=stereo -t 3600', 'silence'];
+    // NOTE: Do NOT add silence fallback here — file sync is preferred over silence.
+    // Silence would show as "playing" but be inaudible, confusing users.
 
     // Append encoding args to each attempt
     $enc = ' -ac ' . $channels . ' -ar ' . $sr . ' -codec:a libmp3lame -b:a ' . escapeshellarg($bitrate) . ' -f mp3 -flush_packets 1 -';
@@ -274,6 +529,9 @@ function llStatusEndpoint() {
     $settings = llLoadSettings();
     $detection = llDetectAudioSources();
     $fppStatus = llGetFppStatus();
+    $bgStatus = llGetBackgroundMusicStatus();
+    $ahStatus = llGetAfterHoursStatus();
+    $fallback = llGetFallbackMedia();
     $nowPlaying = null;
     if ($fppStatus) {
         $nowPlaying = [
@@ -286,11 +544,22 @@ function llStatusEndpoint() {
             'time_elapsed' => $fppStatus['time_elapsed'] ?? '',
             'time_remaining' => $fppStatus['time_remaining'] ?? '',
         ];
-        // FPP sometimes nests under 'current_song' etc; try to normalize media name
         if (isset($fppStatus['current_song'])) {
             $nowPlaying['media'] = $fppStatus['current_song'];
         } elseif (isset($fppStatus['current_sequence'])) {
             $nowPlaying['media'] = $fppStatus['current_sequence'];
+        }
+    }
+    // Augment nowPlaying with background/after-hours if FPP idle but they are active
+    $activeSource = 'fpp';
+    if (!$fppStatus || empty($fppStatus['current_song'])) {
+        if ($fallback) {
+            $activeSource = $fallback['type'];
+            if ($fallback['media']) {
+                if (!$nowPlaying) $nowPlaying = [];
+                $nowPlaying['media'] = $fallback['media'];
+                $nowPlaying['activeSource'] = $fallback['type'];
+            }
         }
     }
     return llJson([
@@ -298,6 +567,10 @@ function llStatusEndpoint() {
         'settings' => $settings,
         'detection' => $detection,
         'fpp_status' => $fppStatus,
+        'background_status' => $bgStatus,
+        'afterhours_status' => $ahStatus,
+        'fallback_media' => $fallback,
+        'active_source' => $activeSource,
         'now_playing' => $nowPlaying,
         'stream_url' => 'api/plugin/fpp-ListenLive/stream',
         'media_url' => 'api/plugin/fpp-ListenLive/media'
@@ -307,6 +580,9 @@ function llStatusEndpoint() {
 function llDiagnosticsEndpoint() {
     $detection = llDetectAudioSources();
     $fppStatus = llGetFppStatus();
+    $bgStatus = llGetBackgroundMusicStatus();
+    $ahStatus = llGetAfterHoursStatus();
+    $fallback = llGetFallbackMedia();
     $settings = llLoadSettings();
     $cmds = llBuildFfmpegCommand($settings, $detection);
     return llJson([
@@ -314,7 +590,12 @@ function llDiagnosticsEndpoint() {
         'detection' => $detection,
         'settings' => $settings,
         'ffmpeg_commands' => array_map(fn($c) => $c[1] . ' => ' . $c[0], $cmds),
-        'fpp_reachable' => $fppStatus !== null
+        'fpp_reachable' => $fppStatus !== null,
+        'background_reachable' => $bgStatus !== null,
+        'afterhours_reachable' => $ahStatus !== null,
+        'fallback_media' => $fallback,
+        'background_status' => $bgStatus,
+        'afterhours_status' => $ahStatus,
     ]);
 }
 
@@ -327,134 +608,95 @@ function llNowPlayingEndpoint() {
 }
 
 function llStreamEndpoint() {
-    // Streaming endpoint - outputs MP3 continuously
     $settings = llLoadSettings();
     if (empty($settings['enabled'])) {
         header('HTTP/1.1 503 Service Unavailable');
-        return llJson(['success' => false, 'error' => 'Listen Live is disabled in plugin settings.']);
+        header('Content-Type: application/json');
+        return llJson(['success' => false, 'error' => 'Listen Live is disabled in plugin settings. Enable it in Content Setup → Listen Live → Config.']);
     }
 
-    // Prevent caching
-    header('Content-Type: audio/mpeg');
-    header('Cache-Control: no-cache, no-store, must-revalidate');
-    header('Pragma: no-cache');
-    header('Expires: 0');
-    header('Accept-Ranges: none');
-    header('Connection: close');
-    // CORS for FPP UI
-    header('Access-Control-Allow-Origin: *');
-
-    // Disable timeout and buffering
-    set_time_limit(0);
-    ignore_user_abort(true);
-    // Clean output buffers
-    while (ob_get_level() > 0) { @ob_end_clean(); }
-    @ini_set('zlib.output_compression', '0');
-    @ini_set('output_buffering', '0');
-    @ini_set('implicit_flush', '1');
-    ob_implicit_flush(1);
-
-    llLog('Stream started from ' . ($_SERVER['REMOTE_ADDR'] ?? 'unknown') . ' source=' . ($settings['source'] ?? 'auto'));
+    // If user explicitly chose file mode, go straight to file sync (including background/after-hours)
+    $source = $settings['source'] ?? 'auto';
+    if ($source === 'file') {
+        llLog('Stream: file mode requested, trying file sync including background/after-hours');
+        return llStreamFileSync(true);
+    }
 
     $detection = llDetectAudioSources();
-    if (!$detection['ffmpeg']) {
-        // Fallback to file sync mode if ffmpeg missing
+    $ffmpeg = $detection['ffmpeg'];
+
+    // If ffmpeg missing, immediately try file sync
+    if (!$ffmpeg) {
         llLog('Stream fallback: ffmpeg not found, trying file sync');
-        // Try to stream current media file directly
-        $fppStatus = llGetFppStatus();
-        $media = $fppStatus['current_song'] ?? $fppStatus['current_sequence'] ?? null;
-        if ($media) {
-            $path = llGetMediaPath($media);
-            if ($path && file_exists($path)) {
-                $fp = @fopen($path, 'rb');
-                if ($fp) {
-                    // Seek based on elapsed? For live feel, start from elapsed offset approximatively
-                    $elapsed = (float)($fppStatus['seconds_elapsed'] ?? 0);
-                    // Estimate byte offset for MP3: bitrate 128k => 16KB/s
-                    // This is rough but gives sync-ish behavior
-                    $bitrateBytes = 16000; // 128k
-                    $offset = (int)($elapsed * $bitrateBytes);
-                    // Align to frame? just seek
-                    @fseek($fp, $offset);
-                    while (!feof($fp) && connection_status() === CONNECTION_NORMAL) {
-                        echo fread($fp, 8192);
-                        flush();
-                        usleep(50000);
-                        if (connection_aborted()) break;
-                    }
-                    fclose($fp);
-                    llLog('Stream file sync ended');
-                    exit;
-                }
-            }
-        }
-        // If no media, output error as audio? just exit with message
-        echo "FFmpeg not available and no media playing\n";
-        llLog('Stream failed: no ffmpeg and no media');
-        exit;
+        return llStreamFileSync(false);
     }
 
+    // Probe live capture candidates WITHOUT sending headers yet — find first that yields data
     $cmds = llBuildFfmpegCommand($settings, $detection);
-    $success = false;
+    $probeResult = null;
     foreach ($cmds as $pair) {
         [$cmd, $label] = $pair;
-        // Test if command would quickly fail? Instead try streaming directly
-        // We use popen to stream; if it fails immediately, try next
         $handle = @popen($cmd . ' 2>/dev/null', 'r');
         if (!$handle) {
-            llLog('Stream attempt failed to popen: ' . $label);
+            llLog('Stream probe failed to popen: ' . $label);
             continue;
         }
-        // Check if stream produces data within 1 second
         stream_set_blocking($handle, false);
         $start = microtime(true);
         $gotData = false;
         $buffer = '';
-        while (microtime(true) - $start < 1.5) {
+        while (microtime(true) - $start < 1.2) {
             $chunk = fread($handle, 8192);
             if ($chunk !== false && $chunk !== '') {
                 $buffer .= $chunk;
                 $gotData = true;
                 break;
             }
-            usleep(50000);
+            // Check if process died (no data and EOF)
+            if (feof($handle)) break;
+            usleep(40000);
             if (connection_aborted()) {
                 pclose($handle);
                 exit;
             }
         }
-        if (!$gotData) {
-            pclose($handle);
-            llLog('Stream attempt produced no data: ' . $label);
-            if ($label === 'silence') {
-                // silence source should work; retry blocking
-                $handle = @popen($cmd . ' 2>/dev/null', 'r');
-                if ($handle) {
-                    stream_set_blocking($handle, true);
-                    while (!feof($handle) && connection_status() === CONNECTION_NORMAL) {
-                        $chunk = fread($handle, 8192);
-                        if ($chunk === false || $chunk === '') {
-                            usleep(20000);
-                            continue;
-                        }
-                        echo $chunk;
-                        flush();
-                        if (connection_aborted()) break;
-                    }
-                    pclose($handle);
-                    llLog('Stream silence ended');
-                    exit;
-                }
-            }
-            continue;
+        if ($gotData) {
+            // Success — we have a working capture source
+            $probeResult = ['handle' => $handle, 'label' => $label, 'buffer' => $buffer, 'cmd' => $cmd];
+            break;
         }
-        // We have data - switch to blocking and stream rest
+        pclose($handle);
+        llLog('Stream probe no data: ' . $label);
+        // Continue to next candidate
+    }
+
+    if ($probeResult) {
+        // We have live capture — now send headers and stream
+        header('Content-Type: audio/mpeg');
+        header('Cache-Control: no-cache, no-store, must-revalidate');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+        header('Accept-Ranges: none');
+        header('Connection: close');
+        header('Access-Control-Allow-Origin: *');
+
+        set_time_limit(0);
+        ignore_user_abort(true);
+        while (ob_get_level() > 0) { @ob_end_clean(); }
+        @ini_set('zlib.output_compression', '0');
+        @ini_set('output_buffering', '0');
+        @ini_set('implicit_flush', '1');
+        ob_implicit_flush(1);
+
+        $handle = $probeResult['handle'];
+        $label = $probeResult['label'];
+        $buffer = $probeResult['buffer'];
+
+        llLog('Stream started from ' . ($_SERVER['REMOTE_ADDR'] ?? 'unknown') . ' source=' . $label . ' (live capture)');
+
         stream_set_blocking($handle, true);
-        // Flush initial buffer
         echo $buffer;
         flush();
-        llLog('Stream active using: ' . $label);
-        $success = true;
         while (!feof($handle) && connection_status() === CONNECTION_NORMAL) {
             $chunk = fread($handle, 8192);
             if ($chunk === false) break;
@@ -467,16 +709,198 @@ function llStreamEndpoint() {
             if (connection_aborted()) break;
         }
         pclose($handle);
-        llLog('Stream ended for: ' . $label);
+        llLog('Stream ended live: ' . $label);
         exit;
     }
 
-    if (!$success) {
-        llLog('Stream all attempts failed');
-        header('HTTP/1.1 500 Internal Server Error');
-        echo "All audio sources failed. Check diagnostics.";
+    // Live capture failed for all candidates — fall back to file sync (FPP + background + after-hours)
+    llLog('Stream live capture failed for all candidates, trying file sync fallback');
+    return llStreamFileSync(false);
+}
+
+function llStreamFileSync($isExplicitFileMode) {
+    // Try to find a local media file to stream (FPP, BackgroundMusic, AfterHours)
+    // Returns never — either streams and exits, or sends JSON error and exits
+
+    // Ensure headers not yet sent as audio — we will decide type below
+    // Clean buffers before choosing
+    while (ob_get_level() > 0) { @ob_end_clean(); }
+
+    $fallback = llGetFallbackMedia();
+    $fppStatus = llGetFppStatus();
+    $elapsed = 0;
+    if ($fppStatus) $elapsed = (float)($fppStatus['seconds_elapsed'] ?? 0);
+
+    // Handle after-hours internet stream — proxy it
+    if ($fallback && $fallback['type'] === 'afterhours' && !empty($fallback['streamUrl'])) {
+        $streamUrl = $fallback['streamUrl'];
+        llLog('Stream file sync: proxying after-hours stream ' . $streamUrl);
+        // Proxy the remote stream via ffmpeg transcoding to mp3 for browser compat
+        $ffmpeg = llFindFfmpeg();
+        if (llDetectAudioSources()['ffmpeg']) {
+            header('Content-Type: audio/mpeg');
+            header('Cache-Control: no-cache, no-store, must-revalidate');
+            header('Pragma: no-cache');
+            header('Expires: 0');
+            header('Access-Control-Allow-Origin: *');
+            set_time_limit(0);
+            ignore_user_abort(true);
+            @ini_set('zlib.output_compression', '0');
+            ob_implicit_flush(1);
+            $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -i ' . escapeshellarg($streamUrl) . ' -codec:a libmp3lame -b:a 128k -f mp3 -flush_packets 1 -';
+            $handle = @popen($cmd . ' 2>/dev/null', 'r');
+            if ($handle) {
+                while (!feof($handle) && connection_status() === CONNECTION_NORMAL) {
+                    $chunk = fread($handle, 8192);
+                    if ($chunk !== false && $chunk !== '') { echo $chunk; flush(); }
+                    if (connection_aborted()) break;
+                    if ($chunk === '' || $chunk === false) usleep(20000);
+                }
+                pclose($handle);
+                llLog('Stream after-hours proxy ended');
+                exit;
+            }
+        }
+        // Fallback: redirect to stream URL directly
+        header('Location: ' . $streamUrl, true, 302);
         exit;
     }
+
+    // For local file (FPP or BackgroundMusic), stream the file
+    $path = $fallback['path'] ?? null;
+    $media = $fallback['media'] ?? null;
+    $type = $fallback['type'] ?? 'fpp';
+
+    if ($path && file_exists($path)) {
+        llLog('Stream file sync: streaming ' . $type . ' file ' . $path . ' elapsed=' . $elapsed);
+        // Use ffmpeg to seek and transcode for accurate sync, fallback to raw read
+        $ffmpeg = llFindFfmpeg();
+        $hasFfmpeg = llDetectAudioSources()['ffmpeg'];
+        if ($hasFfmpeg && $elapsed > 1) {
+            header('Content-Type: audio/mpeg');
+            header('Cache-Control: no-cache, no-store, must-revalidate');
+            header('Pragma: no-cache');
+            header('Expires: 0');
+            header('Access-Control-Allow-Origin: *');
+            set_time_limit(0);
+            ignore_user_abort(true);
+            @ini_set('zlib.output_compression', '0');
+            ob_implicit_flush(1);
+            // Use -ss before -i for fast seek
+            $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)max(0, (int)$elapsed)) . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -f mp3 -flush_packets 1 -';
+            $handle = @popen($cmd . ' 2>/dev/null', 'r');
+            if ($handle) {
+                while (!feof($handle) && connection_status() === CONNECTION_NORMAL) {
+                    $chunk = fread($handle, 8192);
+                    if ($chunk !== false && $chunk !== '') { echo $chunk; flush(); }
+                    if (connection_aborted()) break;
+                    if ($chunk === '' || $chunk === false) usleep(15000);
+                }
+                pclose($handle);
+                llLog('Stream file sync transcoded ended: ' . $path);
+                exit;
+            }
+        }
+        // Raw file fallback with byte-offset approximation (for mp3)
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        $mime = $finfo ? finfo_file($finfo, $path) : 'audio/mpeg';
+        if ($finfo) finfo_close($finfo);
+        $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+        $mimeMap = ['mp3'=>'audio/mpeg','ogg'=>'audio/ogg','wav'=>'audio/wav','flac'=>'audio/flac','m4a'=>'audio/mp4','aac'=>'audio/aac'];
+        if (isset($mimeMap[$ext])) $mime = $mimeMap[$ext];
+        // For mp3, try byte offset seek
+        if ($ext === 'mp3' && $elapsed > 1) {
+            $bitrateBytes = 16000;
+            $offset = (int)($elapsed * $bitrateBytes);
+            $size = filesize($path);
+            if ($offset < $size) {
+                header('Content-Type: audio/mpeg');
+                header('Cache-Control: no-cache, no-store, must-revalidate');
+                header('Access-Control-Allow-Origin: *');
+                $fp = @fopen($path, 'rb');
+                if ($fp) {
+                    @fseek($fp, $offset);
+                    set_time_limit(0);
+                    ignore_user_abort(true);
+                    @ini_set('zlib.output_compression', '0');
+                    ob_implicit_flush(1);
+                    while (!feof($fp) && connection_status() === CONNECTION_NORMAL) {
+                        $data = fread($fp, 8192);
+                        if ($data === false) break;
+                        echo $data;
+                        flush();
+                        usleep(30000);
+                        if (connection_aborted()) break;
+                    }
+                    fclose($fp);
+                    llLog('Stream file sync raw ended (seek): ' . $path);
+                    exit;
+                }
+            }
+        }
+        // No seek or non-mp3: just send file
+        header('Content-Type: ' . $mime);
+        header('Cache-Control: no-cache, no-store, must-revalidate');
+        header('Access-Control-Allow-Origin: *');
+        // Support range
+        if (isset($_SERVER['HTTP_RANGE'])) {
+            $size = filesize($path);
+            if (preg_match('/bytes=(\d+)-(\d*)/', $_SERVER['HTTP_RANGE'], $m)) {
+                $start = (int)$m[1];
+                $end = $m[2] !== '' ? (int)$m[2] : $size - 1;
+                if ($start < $size && $end < $size) {
+                    header('HTTP/1.1 206 Partial Content');
+                    header("Content-Range: bytes $start-$end/$size");
+                    header('Content-Length: ' . ($end - $start + 1));
+                    $fp = fopen($path, 'rb');
+                    fseek($fp, $start);
+                    $remaining = $end - $start + 1;
+                    while ($remaining > 0 && !feof($fp) && connection_status() === CONNECTION_NORMAL) {
+                        $chunk = fread($fp, min(8192, $remaining));
+                        if ($chunk === false) break;
+                        echo $chunk;
+                        flush();
+                        $remaining -= strlen($chunk);
+                    }
+                    fclose($fp);
+                    exit;
+                }
+            }
+        } else {
+            header('Content-Length: ' . filesize($path));
+        }
+        header('Accept-Ranges: bytes');
+        readfile($path);
+        llLog('Stream file sync readfile ended: ' . $path);
+        exit;
+    }
+
+    // No file found — check why and give helpful JSON error
+    $reason = 'No audio is currently playing';
+    $details = [];
+    if ($fppStatus) {
+        $statusName = $fppStatus['status_name'] ?? $fppStatus['status'] ?? 'idle';
+        if (strtolower($statusName) === 'idle' || $fppStatus['current_song'] === null) {
+            $reason = 'FPP is idle and no background music is active';
+            $bg = llGetBackgroundMusicStatus();
+            $ah = llGetAfterHoursStatus();
+            if ($bg) $details[] = 'BackgroundMusic plugin responded but no track found';
+            if ($ah) $details[] = 'AfterHours plugin responded but no stream active';
+            if (!$bg && !$ah) $details[] = 'No background plugins detected — is BackgroundMusic or AfterHours installed and playing?';
+        }
+    } else {
+        $reason = 'FPPD not reachable and no fallback media found';
+    }
+    if ($fallback && empty($fallback['path'])) {
+        $reason = 'Found fallback media "' . ($fallback['media'] ?? 'unknown') . '" (' . $fallback['type'] . ') but file not found at ' . ($fallback['path'] ?? 'null');
+    }
+    if ($isExplicitFileMode) {
+        $reason .= ' (file mode requested)';
+    }
+    llLog('Stream file sync failed: ' . $reason . ' details: ' . implode('; ', $details));
+    header('HTTP/1.1 503 Service Unavailable');
+    header('Content-Type: application/json');
+    return llJson(['success' => false, 'error' => $reason, 'details' => $details, 'hint' => 'Start a playlist, or start background music via BackgroundMusic/AfterHours plugin, then try again. Check Diagnostics and Logs tabs.']);
 }
 
 function llMediaStreamEndpoint() {
@@ -615,14 +1039,25 @@ function llTestEndpoint() {
     $detection = llDetectAudioSources();
     $settings = llLoadSettings();
     $results = [];
-    $results[] = ['check' => 'FFmpeg installed (' . $detection['ffmpeg_path'] . ')', 'ok' => $detection['ffmpeg'] ? 1 : 0];
-    $results[] = ['check' => 'PulseAudio available', 'ok' => $detection['pulse'] ? 1 : 0, 'detail' => implode(', ', $detection['pulse_sources'])];
+    $results[] = ['check' => 'FFmpeg installed (' . $detection['ffmpeg_path'] . ')', 'ok' => $detection['ffmpeg'] ? 1 : 0, 'detail' => $detection['ffmpeg_pipewire'] ? 'pipewire demuxer yes' : ''];
+    $results[] = ['check' => 'PipeWire available', 'ok' => $detection['pipewire'] ? 1 : 0, 'detail' => implode(', ', array_slice($detection['pipewire_sources'],0,3))];
+    $results[] = ['check' => 'PulseAudio (pipewire-pulse) available', 'ok' => $detection['pulse'] ? 1 : 0, 'detail' => implode(', ', $detection['pulse_sources'])];
     $results[] = ['check' => 'ALSA available', 'ok' => $detection['alsa'] ? 1 : 0, 'detail' => implode(', ', array_slice($detection['alsa_devices'],0,3))];
     $fppStatus = llGetFppStatus();
+    $bgStatus = llGetBackgroundMusicStatus();
+    $ahStatus = llGetAfterHoursStatus();
+    $fallback = llGetFallbackMedia();
     $results[] = ['check' => 'FPPD reachable', 'ok' => $fppStatus ? 1 : 0];
     if ($fppStatus) {
         $media = $fppStatus['current_song'] ?? $fppStatus['current_sequence'] ?? 'none';
-        $results[] = ['check' => 'Currently playing', 'ok' => 1, 'detail' => is_string($media) ? $media : json_encode($media)];
+        $results[] = ['check' => 'FPP currently playing', 'ok' => 1, 'detail' => is_string($media) ? $media : json_encode($media)];
+    }
+    $results[] = ['check' => 'BackgroundMusic plugin', 'ok' => $bgStatus ? 1 : 0, 'detail' => $bgStatus ? json_encode(array_slice($bgStatus,0,2)) : 'not installed / not responding'];
+    $results[] = ['check' => 'AfterHours plugin', 'ok' => $ahStatus ? 1 : 0, 'detail' => $ahStatus ? 'responding' : 'not installed / not responding'];
+    if ($fallback) {
+        $results[] = ['check' => 'Fallback media (' . $fallback['type'] . ')', 'ok' => !empty($fallback['path']) || !empty($fallback['streamUrl']) ? 1 : 0, 'detail' => $fallback['media'] . (empty($fallback['path']) && empty($fallback['streamUrl']) ? ' (file not found)' : '')];
+    } else {
+        $results[] = ['check' => 'Fallback media', 'ok' => 0, 'detail' => 'No FPP/background/after-hours media found'];
     }
     // Try a 1-second ffmpeg probe for the chosen source
     if ($detection['ffmpeg']) {

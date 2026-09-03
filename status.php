@@ -66,20 +66,35 @@ var llStatus = {
                 html += '<tr><td style="padding:4px;"><b>Plugin Enabled:</b></td><td style="padding:4px;">' + (settings.enabled ? '<span class="text-success">Yes</span>' : '<span class="text-danger">No</span>') + '</td></tr>';
                 html += '<tr><td style="padding:4px;"><b>Audio Source:</b></td><td style="padding:4px;">' + escHtml(settings.source || 'auto') + '</td></tr>';
                 html += '<tr><td style="padding:4px;"><b>Bitrate:</b></td><td style="padding:4px;">' + escHtml(settings.bitrate || '') + ' / ' + escHtml(String(settings.sample_rate || '')) + ' Hz / ' + (settings.channels===1?'Mono':'Stereo') + '</td></tr>';
-                html += '<tr><td style="padding:4px;"><b>FPP Status:</b></td><td style="padding:4px;">' + escHtml(s.status_name || s.status || 'unknown') + '</td></tr>';
+                var fppStatusText = s.status_name || s.status || 'unknown';
+                if (!s.status_name && !s.status && !d.fpp_status) fppStatusText = 'unreachable';
+                html += '<tr><td style="padding:4px;"><b>FPP Status:</b></td><td style="padding:4px;">' + escHtml(fppStatusText) + '</td></tr>';
                 html += '<tr><td style="padding:4px;"><b>Current Playlist:</b></td><td style="padding:4px;">' + escHtml(s.current_playlist || '—') + '</td></tr>';
                 html += '<tr><td style="padding:4px;"><b>Current Sequence:</b></td><td style="padding:4px;">' + escHtml(s.current_sequence || '—') + '</td></tr>';
                 html += '<tr><td style="padding:4px;"><b>Current Song:</b></td><td style="padding:4px;">' + escHtml(typeof s.current_song === 'string' ? s.current_song : JSON.stringify(s.current_song || '—')) + '</td></tr>';
                 html += '<tr><td style="padding:4px;"><b>Elapsed:</b></td><td style="padding:4px;">' + escHtml(String(s.seconds_elapsed || s.time_elapsed || '0')) + ' / remaining ' + escHtml(String(s.seconds_remaining || s.time_remaining || '—')) + '</td></tr>';
-                html += '<tr><td style="padding:4px;"><b>Stream URL:</b></td><td style="padding:4px;"><code>api/plugin/fpp-ListenLive/stream</code> <a href="api/plugin/fpp-ListenLive/stream" target="_blank">Test</a></td></tr>';
+                // Background/AfterHours fallback when FPP idle
+                if ((!s.current_song || s.current_song === '—') && d.fallback_media && d.fallback_media.media) {
+                    html += '<tr><td style="padding:4px;"><b>Fallback (' + escHtml(d.fallback_media.type) + '):</b></td><td style="padding:4px;">' + escHtml(d.fallback_media.media) + (d.fallback_media.path ? '' : ' <span class="text-warning">(file not found / stream)</span>') + '</td></tr>';
+                }
+                if (d.background_status) html += '<tr><td style="padding:4px;"><b>BackgroundMusic:</b></td><td style="padding:4px;"><span class="text-success">installed</span> <span class="text-secondary" style="font-size:12px;">(will play when show idle if enabled)</span></td></tr>';
+                if (d.afterhours_status) html += '<tr><td style="padding:4px;"><b>AfterHours:</b></td><td style="padding:4px;"><span class="text-success">installed</span></td></tr>';
+                html += '<tr><td style="padding:4px;"><b>Stream URL:</b></td><td style="padding:4px;"><code>api/plugin/fpp-ListenLive/stream</code> <a href="api/plugin/fpp-ListenLive/stream" target="_blank">Test</a> <span class="text-secondary" style="font-size:12px;">— captures live mix including background when available, falls back to file</span></td></tr>';
                 html += '</table>';
                 $('#ll_status_table').html(html);
 
-                // diagnostics
+                // diagnostics — include PipeWire and background plugins
                 var html2 = '<table class="fppTable" style="width:auto;">';
-                html2 += '<tr><td style="padding:4px;"><b>FFmpeg:</b></td><td style="padding:4px;">' + (det.ffmpeg ? '<span class="text-success">Found</span> (' + escHtml(det.ffmpeg_path)+')' : '<span class="text-danger">Missing</span>') + '</td></tr>';
-                html2 += '<tr><td style="padding:4px;"><b>PulseAudio:</b></td><td style="padding:4px;">' + (det.pulse ? '<span class="text-success">Yes</span>' : '<span class="text-secondary">No</span>') + (det.pulse_sources && det.pulse_sources.length ? ' — ' + escHtml(det.pulse_sources.join(', ')) : '') + '</td></tr>';
-                html2 += '<tr><td style="padding:4px;"><b>ALSA:</b></td><td style="padding:4px;">' + (det.alsa ? '<span class="text-success">Yes</span>' : '<span class="text-secondary">No</span>') + (det.alsa_devices && det.alsa_devices.length ? ' — ' + escHtml(det.alsa_devices.slice(0,3).join(', ')) : '') + '</td></tr>';
+                html2 += '<tr><td style="padding:4px;"><b>FFmpeg:</b></td><td style="padding:4px;">' + (det.ffmpeg ? '<span class="text-success">Found</span> (' + escHtml(det.ffmpeg_path)+ (det.ffmpeg_pipewire ? ', pipewire' : '') +')' : '<span class="text-danger">Missing</span>') + '</td></tr>';
+                html2 += '<tr><td style="padding:4px;"><b>PipeWire:</b></td><td style="padding:4px;">' + (det.pipewire ? '<span class="text-success">Yes</span>' : '<span class="text-secondary">No</span>') + (det.pipewire_sources && det.pipewire_sources.length ? ' — ' + escHtml(det.pipewire_sources.slice(0,2).join(', ')) : '') + '</td></tr>';
+                html2 += '<tr><td style="padding:4px;"><b>PulseAudio:</b></td><td style="padding:4px;">' + (det.pulse ? '<span class="text-success">Yes</span>' : '<span class="text-secondary">No</span>') + (det.pulse_sources && det.pulse_sources.length ? ' — ' + escHtml(det.pulse_sources.slice(0,2).join(', ')) : '') + '</td></tr>';
+                html2 += '<tr><td style="padding:4px;"><b>ALSA:</b></td><td style="padding:4px;">' + (det.alsa ? '<span class="text-success">Yes</span>' : '<span class="text-secondary">No</span>') + (det.alsa_devices && det.alsa_devices.length ? ' — ' + escHtml(det.alsa_devices.slice(0,2).join(', ')) : '') + '</td></tr>';
+                if (d.fallback_media) {
+                    var fm = d.fallback_media;
+                    html2 += '<tr><td style="padding:4px;"><b>Fallback:</b></td><td style="padding:4px;">' + escHtml(fm.type + ': ' + fm.media) + (fm.path ? ' <span class="text-success">(found)</span>' : (fm.streamUrl ? ' <span class="text-success">(stream)</span>' : ' <span class="text-danger">(not found)</span>')) + '</td></tr>';
+                }
+                if (d.background_status) html2 += '<tr><td style="padding:4px;"><b>BackgroundMusic:</b></td><td style="padding:4px;"><span class="text-success">Plugin responding</span></td></tr>';
+                if (d.afterhours_status) html2 += '<tr><td style="padding:4px;"><b>AfterHours:</b></td><td style="padding:4px;"><span class="text-success">Plugin responding</span></td></tr>';
                 html2 += '</table>';
                 $('#ll_diag_table').html(html2);
             },
