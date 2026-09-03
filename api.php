@@ -479,15 +479,20 @@ function llBuildFfmpegCommand($settings, $detection) {
     // Build ordered attempts — prioritize PipeWire (FPP 9+), then Pulse, then ALSA
     $attempts = [];
 
-    // Helper to wrap ffmpeg with environment for pipewire/pulse socket access
-    // FPP runs as user 'fpp', apache/php-fpm also as 'fpp', but ensure XDG_RUNTIME_DIR
+     // Helper to wrap ffmpeg with environment for pipewire/pulse socket access
+    // FPP runs as user 'fpp', apache/php-fpm also as 'fpp', but ensure XDG_RUNTIME_DIR and PIPEWIRE_REMOTE
     $envPrefix = '';
-    // Try to set PULSE_SERVER / PIPEWIRE runtime if needed — pulse sometimes needs XDG_RUNTIME_DIR
     $xdg = trim(@shell_exec('echo $XDG_RUNTIME_DIR 2>/dev/null') ?? '');
     if ($xdg === '') {
-        // Common FPP runtime dir
         if (is_dir('/run/user/1000')) $envPrefix = 'XDG_RUNTIME_DIR=/run/user/1000 ';
         elseif (is_dir('/run/user/512')) $envPrefix = 'XDG_RUNTIME_DIR=/run/user/512 ';
+        elseif (is_dir('/run/user/0')) $envPrefix = 'XDG_RUNTIME_DIR=/run/user/0 ';
+    }
+    // FPP's PipeWire uses a dedicated socket for background music mixing
+    if (is_dir('/run/pipewire-fpp') || file_exists('/run/pipewire-fpp/pipewire-0')) {
+        $envPrefix .= 'PIPEWIRE_REMOTE=/run/pipewire-fpp/pipewire-0 ';
+    } elseif (file_exists('/run/user/1000/pipewire-0')) {
+        $envPrefix .= 'PIPEWIRE_REMOTE=/run/user/1000/pipewire-0 ';
     }
     // If we can sudo to fpp, that ensures correct pulse/pipewire perms (harmless if already fpp)
     $canSudoFpp = trim(@shell_exec('sudo -n -u fpp true 2>&1 && echo yes') ?? '') === 'yes';
@@ -854,8 +859,10 @@ function llStreamFileSync($isExplicitFileMode) {
             ignore_user_abort(true);
             @ini_set('zlib.output_compression', '0');
             ob_implicit_flush(1);
-            // Use -ss before -i for fast seek
-            $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)max(0, (int)$elapsed)) . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -f mp3 -flush_packets 1 -';
+            // Use -ss before -i for fast seek; subtract 0.8s for startup/network latency so client is slightly behind, not ahead (reduces drift)
+            $seekPos = max(0, $elapsed - 0.8);
+            // Use -copyts and -start_at_zero to keep timestamps correct for gapless
+            $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)$seekPos) . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -f mp3 -flush_packets 1 -';
             $handle = @popen($cmd . ' 2>/dev/null', 'r');
             if ($handle) {
                 while (!feof($handle) && connection_status() === CONNECTION_NORMAL) {
@@ -876,10 +883,10 @@ function llStreamFileSync($isExplicitFileMode) {
         $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
         $mimeMap = ['mp3'=>'audio/mpeg','ogg'=>'audio/ogg','wav'=>'audio/wav','flac'=>'audio/flac','m4a'=>'audio/mp4','aac'=>'audio/aac'];
         if (isset($mimeMap[$ext])) $mime = $mimeMap[$ext];
-        // For mp3, try byte offset seek
+        // For mp3, try byte offset seek (less accurate, fallback)
         if ($ext === 'mp3' && $elapsed > 1) {
             $bitrateBytes = 16000;
-            $offset = (int)($elapsed * $bitrateBytes);
+            $offset = (int)(max(0, $elapsed - 0.8) * $bitrateBytes);
             $size = filesize($path);
             if ($offset < $size) {
                 header('Content-Type: audio/mpeg');

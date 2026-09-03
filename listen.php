@@ -118,6 +118,11 @@ var llPlayer = {
     isMuted: false,
     preMuteVol: 80,
     lastMedia: null,
+    streamStartElapsed: null,
+    streamStartTime: null,
+    driftChecks: 0,
+    reconnectAttempts: 0,
+    stalledTimer: null,
     streamUrl: 'api/plugin/fpp-ListenLive/stream',
     // Append cache buster to force reconnect without browser cache
     buildUrl: function() { return llPlayer.streamUrl + '?t=' + Date.now(); },
@@ -138,6 +143,11 @@ var llPlayer = {
         }
         llPlayer.audio.addEventListener('playing', function() {
             llPlayer.isPlaying = true;
+            llPlayer.reconnectAttempts = 0;
+            // Reset sync tracking — will be set on next status poll with current elapsed
+            llPlayer.streamStartElapsed = null;
+            llPlayer.streamStartTime = Date.now();
+            llPlayer.driftChecks = 0;
             $('#ll_badge').removeClass('ll-badge-idle ll-badge-warn').addClass('ll-badge-live').text('● LIVE');
             $('#ll_wave').removeClass('paused');
             $('#ll_btn_play').val('❚❚ Pause');
@@ -160,8 +170,9 @@ var llPlayer = {
             if (code === 4) msg += ' — source returned no audio or unsupported format';
             if (code === 2) msg += ' — network error';
             if (code === 3) msg += ' — decoding failed';
+            llPlayer.reconnectAttempts = (llPlayer.reconnectAttempts || 0) + 1;
             $('#ll_badge').removeClass('ll-badge-live ll-badge-idle').addClass('ll-badge-warn').text('Error');
-            $('#ll_status_text').html('<span class="text-danger">' + escHtml(msg) + '. Checking diagnostics...</span>');
+            $('#ll_status_text').html('<span class="text-danger">' + escHtml(msg) + ' (attempt ' + llPlayer.reconnectAttempts + '). Checking diagnostics...</span>');
             // Fetch diagnostics to show helpful hint
             $.ajax({
                 url: 'api/plugin/fpp-ListenLive/diagnostics',
@@ -169,24 +180,67 @@ var llPlayer = {
                 dataType: 'json',
                 success: function(d) {
                     var hint = '';
+                    var isTrackChange = llPlayer.lastMedia && d.fallback_media && d.fallback_media.media && llPlayer.lastMedia.indexOf(d.fallback_media.media) === -1;
+                    if (isTrackChange) {
+                        hint = ' — track changed, waiting for new file';
+                        // Wait a bit longer for new track to be ready
+                        if (llPlayer.isPlaying && llPlayer.reconnectAttempts < 5) {
+                            setTimeout(function(){ llPlayer.reconnect(); }, 1800);
+                            return;
+                        }
+                    }
                     if (d.fallback_media && !d.fallback_media.path && !d.fallback_media.streamUrl) {
                         hint = ' — no media found (' + escHtml(d.fallback_media.type + ': ' + d.fallback_media.media) + ')';
+                        if (d.fallback_media.type === 'background' || d.fallback_media.type === 'fpp') {
+                            hint += ' — is playlist still playing? Check FPP Status/Control';
+                        }
                     } else if (!d.detection || !d.detection.ffmpeg) {
                         hint = ' — ffmpeg missing';
                     } else if (!d.detection.pipewire && !d.detection.pulse && !d.detection.alsa) {
-                        hint = ' — no capture devices detected';
+                        hint = ' — no capture devices, trying file sync';
+                    } else if (d.fallback_media && d.fallback_media.path) {
+                        hint = ' — retrying file sync for ' + escHtml(d.fallback_media.media);
                     }
-                    $('#ll_status_text').html('<span class="text-danger">' + escHtml(msg) + hint + '</span> <span class="text-secondary" style="font-size:12px;">Check Diagnostics & Logs tabs for details. Will retry...</span>');
+                    $('#ll_status_text').html('<span class="text-danger">' + escHtml(msg) + hint + '</span> <span class="text-secondary" style="font-size:12px;">Check Diagnostics & Logs tabs. Will retry...</span>');
                 },
-                error: function() {}
+                error: function() {
+                    $('#ll_status_text').html('<span class="text-danger">' + escHtml(msg) + '</span> <span class="text-secondary">Could not load diagnostics — will retry...</span>');
+                }
             });
-            // Auto reconnect after 3s if we were playing
+            // Auto reconnect with backoff if we were playing (max 5 attempts, then pause)
             if (llPlayer.isPlaying) {
-                setTimeout(function() { llPlayer.reconnect(); }, 3000);
+                if (llPlayer.reconnectAttempts > 8) {
+                    $('#ll_status_text').html('<span class="text-danger">Gave up after multiple errors — click Play to retry</span>');
+                    llPlayer.isPlaying = false;
+                    return;
+                }
+                var backoff = Math.min(8000, 1000 * Math.pow(1.5, llPlayer.reconnectAttempts - 1));
+                // If track just changed, wait a bit longer
+                if (llPlayer.lastMedia && llPlayer.reconnectAttempts === 1) backoff = Math.max(backoff, 1500);
+                setTimeout(function() { if (llPlayer.isPlaying) llPlayer.reconnect(); }, backoff);
             }
         });
         llPlayer.audio.addEventListener('stalled', function() {
             $('#ll_status_text').html('<span class="text-warning">Buffering...</span>');
+            clearTimeout(llPlayer.stalledTimer);
+            llPlayer.stalledTimer = setTimeout(function(){
+                if (llPlayer.audio.readyState < 2 && llPlayer.isPlaying) {
+                    $('#ll_status_text').html('<span class="text-warning">Buffering timeout — re-syncing...</span>');
+                    llPlayer.reconnect();
+                }
+            }, 4000);
+        });
+        llPlayer.audio.addEventListener('waiting', function() {
+            $('#ll_status_text').html('<span class="text-warning">Buffering...</span>');
+        });
+        llPlayer.audio.addEventListener('canplay', function() {
+            clearTimeout(llPlayer.stalledTimer);
+        });
+        llPlayer.audio.addEventListener('progress', function() {
+            // Clear buffering state when progress resumes
+            if (llPlayer.audio.readyState >= 3) {
+                clearTimeout(llPlayer.stalledTimer);
+            }
         });
         llPlayer.refreshStatus();
         setInterval(llPlayer.refreshStatus, 3000);
@@ -351,10 +405,51 @@ var llPlayer = {
                 }
                 if (llPlayer.isPlaying && llPlayer.lastMedia && llPlayer.lastMedia !== currentMediaKey && isFileSync) {
                     $('#ll_status_text').html('<span class="text-warning">Track changed — re-syncing for multisync...</span>');
+                    // Reset drift tracking for new track
+                    llPlayer.streamStartElapsed = null;
+                    llPlayer.streamStartTime = null;
+                    llPlayer.driftChecks = 0;
                     llPlayer.lastMedia = currentMediaKey;
-                    setTimeout(function(){ llPlayer.reconnect(); }, 500);
+                    setTimeout(function(){ llPlayer.reconnect(); }, 1200);
                 } else {
                     llPlayer.lastMedia = currentMediaKey;
+                }
+
+                // Drift correction for file-sync (keeps background/FPP file sync in sync with show)
+                if (llPlayer.isPlaying && isFileSync && llPlayer.audio && !llPlayer.audio.paused && llPlayer.audio.readyState >= 2) {
+                    var currentFallbackElapsed = 0;
+                    if (d.fallback_media && typeof d.fallback_media.elapsed === 'number') currentFallbackElapsed = d.fallback_media.elapsed;
+                    else if (typeof s.seconds_elapsed === 'number') currentFallbackElapsed = s.seconds_elapsed;
+                    else if (d.background_status && typeof d.background_status.trackElapsed === 'number') currentFallbackElapsed = d.background_status.trackElapsed;
+                    if (llPlayer.streamStartElapsed === null && currentFallbackElapsed > 0) {
+                        llPlayer.streamStartElapsed = currentFallbackElapsed;
+                        llPlayer.streamStartTime = Date.now();
+                        llPlayer.driftChecks = 0;
+                    } else if (llPlayer.streamStartElapsed !== null && currentFallbackElapsed > 0) {
+                        var wallElapsed = (Date.now() - llPlayer.streamStartTime) / 1000;
+                        var expectedAudioTime = currentFallbackElapsed - llPlayer.streamStartElapsed;
+                        var actual = llPlayer.audio.currentTime;
+                        // Account for initial seek offset already in stream (stream starts at seekPos, so actual 0 = elapsed)
+                        // Drift is actual vs expected
+                        var drift = actual - expectedAudioTime;
+                        if (wallElapsed > 6 && Math.abs(drift) > 2.8) {
+                            llPlayer.driftChecks = (llPlayer.driftChecks || 0) + 1;
+                            if (llPlayer.driftChecks >= 2) {
+                                $('#ll_status_text').html('<span class="text-warning">Drift ' + drift.toFixed(1) + 's — re-syncing...</span>');
+                                llPlayer.driftChecks = 0;
+                                llPlayer.streamStartElapsed = currentFallbackElapsed;
+                                llPlayer.streamStartTime = Date.now();
+                                setTimeout(function(){ if (llPlayer.isPlaying) llPlayer.reconnect(); }, 400);
+                            }
+                        } else {
+                            // Small drift, reset counter
+                            if (Math.abs(drift) < 1.5) llPlayer.driftChecks = 0;
+                        }
+                    }
+                } else if (!llPlayer.isPlaying) {
+                    llPlayer.streamStartElapsed = null;
+                    llPlayer.streamStartTime = null;
+                    llPlayer.driftChecks = 0;
                 }
 
                 if (!fppdReachable && !llPlayer.isPlaying && !isBackgroundPlaying) {
