@@ -328,6 +328,32 @@ function llGetBackgroundMusicStatus() {
             if (is_array($data)) return $data;
         }
     }
+    // Fallback: read status file directly (more up-to-date and works even if HTTP API is slow)
+    $statusFile = '/tmp/bg_music_status.txt';
+    if (file_exists($statusFile) && is_readable($statusFile)) {
+        $lines = @file($statusFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if ($lines) {
+            $data = [];
+            foreach ($lines as $line) {
+                $pos = strpos($line, '=');
+                if ($pos !== false) {
+                    $k = substr($line, 0, $pos);
+                    $v = substr($line, $pos + 1);
+                    $data[$k] = $v;
+                }
+            }
+            if (!empty($data['filename'])) {
+                // Convert to API-like structure for compatibility
+                $data['currentTrack'] = $data['filename'];
+                $data['trackElapsed'] = isset($data['elapsed']) ? (int)$data['elapsed'] : 0;
+                $data['trackDuration'] = isset($data['duration']) ? (int)$data['duration'] : 0;
+                $data['backgroundMusicRunning'] = true;
+                // Also include raw for debugging
+                $data['_source'] = 'direct_file';
+                return $data;
+            }
+        }
+    }
     return null;
 }
 
@@ -375,9 +401,15 @@ function llGetFallbackMedia() {
             return ['path' => null, 'type' => 'fpp', 'media' => $media, 'elapsed' => (float)($fppStatus['seconds_elapsed'] ?? 0)];
         }
     }
-    // 2) BackgroundMusic plugin — check if it is playing
+     // 2) BackgroundMusic plugin — check if it is playing
     $bg = llGetBackgroundMusicStatus();
     if ($bg) {
+        // Check if background is a stream (internet radio) — handle before file candidates
+        $bgSource = $bg['config']['BackgroundMusicSource'] ?? $bg['BackgroundMusicSource'] ?? '';
+        $bgStreamUrl = $bg['config']['BackgroundMusicStreamURL'] ?? $bg['BackgroundMusicStreamURL'] ?? $bg['stream_url'] ?? $bg['streamUrl'] ?? '';
+        if (($bgSource === 'stream' || !empty($bg['streamSource']) || !empty($bg['stream_source'])) && $bgStreamUrl) {
+            return ['path' => null, 'type' => 'background', 'media' => $bgStreamUrl, 'streamUrl' => $bgStreamUrl, 'bgStatus' => $bg, 'elapsed' => 0];
+        }
         // Try various field names used by different versions
         $candidates = [];
         // Common fields: currentTrack, currentSong, track, nowPlaying, currentMedia
@@ -445,6 +477,8 @@ function llGetFallbackMedia() {
 }
 
 function llGetMediaPath($mediaName) {
+    // If already absolute path
+    if (strpos($mediaName, '/') === 0 && file_exists($mediaName)) return $mediaName;
     // FPP stores media in /home/fpp/media/music or /home/fpp/media/videos
     $bases = [
         '/home/fpp/media/music',
@@ -459,6 +493,19 @@ function llGetMediaPath($mediaName) {
         // also try without subdir if mediaName already contains path
         $candidate2 = rtrim($base, '/') . '/' . basename($mediaName);
         if (file_exists($candidate2)) return $candidate2;
+    }
+    // Try background music playlist file (contains full paths)
+    $bgPlaylist = '/tmp/background_music_playlist.m3u';
+    if (file_exists($bgPlaylist)) {
+        $lines = @file($bgPlaylist, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if ($lines) {
+            foreach ($lines as $line) {
+                $line = trim($line);
+                if ($line === '' || $line[0] === '#') continue;
+                if (basename($line) === basename($mediaName) && file_exists($line)) return $line;
+                if ($line === $mediaName && file_exists($line)) return $line;
+            }
+        }
     }
     // fallback: search via find (limited)
     $out = trim(@shell_exec('find /home/fpp/media -maxdepth 4 -name ' . escapeshellarg(basename($mediaName)) . ' 2>/dev/null | head -1') ?? '');
@@ -804,10 +851,10 @@ function llStreamFileSync($isExplicitFileMode) {
         }
     }
 
-    // Handle after-hours internet stream — proxy it
-    if ($fallback && $fallback['type'] === 'afterhours' && !empty($fallback['streamUrl'])) {
+    // Handle internet stream (after-hours or background stream) — proxy it
+    if ($fallback && in_array($fallback['type'], ['afterhours','background']) && !empty($fallback['streamUrl'])) {
         $streamUrl = $fallback['streamUrl'];
-        llLog('Stream file sync: proxying after-hours stream ' . $streamUrl);
+        llLog('Stream file sync: proxying ' . $fallback['type'] . ' stream ' . $streamUrl);
         // Proxy the remote stream via ffmpeg transcoding to mp3 for browser compat
         $ffmpeg = llFindFfmpeg();
         if (llDetectAudioSources()['ffmpeg']) {
@@ -859,8 +906,8 @@ function llStreamFileSync($isExplicitFileMode) {
             ignore_user_abort(true);
             @ini_set('zlib.output_compression', '0');
             ob_implicit_flush(1);
-            // Use -ss before -i for fast seek; subtract 0.8s for startup/network latency so client is slightly behind, not ahead (reduces drift)
-            $seekPos = max(0, $elapsed - 0.8);
+            // Use -ss before -i for fast seek; subtract 1.3s for startup/network/ffmpeg latency so client is slightly behind, not ahead (user reported few seconds drift)
+            $seekPos = max(0, $elapsed - 1.3);
             // Use -copyts and -start_at_zero to keep timestamps correct for gapless
             $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)$seekPos) . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -f mp3 -flush_packets 1 -';
             $handle = @popen($cmd . ' 2>/dev/null', 'r');
@@ -886,7 +933,7 @@ function llStreamFileSync($isExplicitFileMode) {
         // For mp3, try byte offset seek (less accurate, fallback)
         if ($ext === 'mp3' && $elapsed > 1) {
             $bitrateBytes = 16000;
-            $offset = (int)(max(0, $elapsed - 0.8) * $bitrateBytes);
+            $offset = (int)(max(0, $elapsed - 1.3) * $bitrateBytes);
             $size = filesize($path);
             if ($offset < $size) {
                 header('Content-Type: audio/mpeg');

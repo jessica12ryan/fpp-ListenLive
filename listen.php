@@ -225,10 +225,11 @@ var llPlayer = {
             clearTimeout(llPlayer.stalledTimer);
             llPlayer.stalledTimer = setTimeout(function(){
                 if (llPlayer.audio.readyState < 2 && llPlayer.isPlaying) {
+                    // Don't reconnect if a track-change reconnect is already pending (lastMedia just changed)
                     $('#ll_status_text').html('<span class="text-warning">Buffering timeout — re-syncing...</span>');
                     llPlayer.reconnect();
                 }
-            }, 4000);
+            }, 6000);
         });
         llPlayer.audio.addEventListener('waiting', function() {
             $('#ll_status_text').html('<span class="text-warning">Buffering...</span>');
@@ -243,7 +244,7 @@ var llPlayer = {
             }
         });
         llPlayer.refreshStatus();
-        setInterval(llPlayer.refreshStatus, 3000);
+        setInterval(llPlayer.refreshStatus, 2000);
         llPlayer.refreshDiagnostics();
     },
 
@@ -393,24 +394,38 @@ var llPlayer = {
                 $('#ll_src').text(settings.source || 'auto');
                 $('#ll_bitrate').text(settings.bitrate || '128k');
 
-                // Auto-reconnect when track changes while in file-sync mode (keeps file sync in sync with FPP/multisync)
+                // Auto-reconnect when track changes while in file-sync mode
+                // Live PipeWire/Pulse capture is gapless and mixes background correctly — no reconnect needed there
                 var currentMediaKey = (media || '') + '|' + (s.current_playlist || '') + '|' + (d.fallback_media ? d.fallback_media.type : '') + '|' + (d.fallback_media ? d.fallback_media.media : '');
                 var isFileSync = !settings.enabled ? false : (settings.source === 'file' || (!det.pipewire && !det.pulse && !det.alsa));
-                // Also consider explicit file fallback: if live capture failed, detection may still show pipewire but stream is file-synced
-                // Use fallback type as hint: if active source is not live capture, treat as file sync
-                if (!isFileSync && d.fallback_media && d.fallback_media.type !== 'fpp') {
-                    // If we are playing background/afterhours via file, we are in file-sync even if live devices exist but failed probe
-                    // Check last probe result via diagnostics: if stream would fallback, stay in sync
-                    isFileSync = true;
-                }
+                // Only force file-sync for background if live devices are actually unavailable
+                // If live monitor is available, background is already mixed in live capture — no need to re-sync on track change
                 if (llPlayer.isPlaying && llPlayer.lastMedia && llPlayer.lastMedia !== currentMediaKey && isFileSync) {
-                    $('#ll_status_text').html('<span class="text-warning">Track changed — re-syncing for multisync...</span>');
-                    // Reset drift tracking for new track
+                    $('#ll_status_text').html('<span class="text-warning">Track changed — re-syncing...</span>');
+                    // Reset drift tracking for new track; wait a bit longer for new file to be ready (background crossfade = 3s)
                     llPlayer.streamStartElapsed = null;
                     llPlayer.streamStartTime = null;
                     llPlayer.driftChecks = 0;
                     llPlayer.lastMedia = currentMediaKey;
-                    setTimeout(function(){ llPlayer.reconnect(); }, 1200);
+                    clearTimeout(llPlayer.stalledTimer);
+                    setTimeout(function(){
+                        // Double-check new track still current before reconnect (avoid flapping if status hasn't settled)
+                        $.ajax({
+                            url: 'api/plugin/fpp-ListenLive/status',
+                            type: 'GET',
+                            dataType: 'json',
+                            success: function(nd) {
+                                var nm = (nd.fpp_status && (nd.fpp_status.current_song || nd.fpp_status.current_sequence)) || (nd.fallback_media && nd.fallback_media.media) || '';
+                                if (nm && media && nm !== media.split(' (')[0]) {
+                                    // Status still shows old track, wait a bit more
+                                    setTimeout(function(){ if (llPlayer.isPlaying) llPlayer.reconnect(); }, 800);
+                                } else {
+                                    if (llPlayer.isPlaying) llPlayer.reconnect();
+                                }
+                            },
+                            error: function(){ if (llPlayer.isPlaying) llPlayer.reconnect(); }
+                        });
+                    }, 1800);
                 } else {
                     llPlayer.lastMedia = currentMediaKey;
                 }
