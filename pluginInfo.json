@@ -1,0 +1,48 @@
+{
+	"repoName": "fpp-ListenLive",
+	"name": "Listen Live Plugin for FPP",
+	"author": "jessica12ryan",
+	"description": "Listen to your show's live audio directly from within the FPP UI. Streams the FPP audio output to the browser via an HTML5 player with live status, volume control, and file-sync fallback. Works with PulseAudio, ALSA, or direct media file streaming.",
+	"homeURL": "https://github.com/jessica12ryan/fpp-ListenLive",
+	"srcURL": "https://github.com/jessica12ryan/fpp-ListenLive.git",
+	"bugURL": "https://github.com/jessica12ryan/fpp-ListenLive/issues",
+	"iconURL": "https://raw.githubusercontent.com/jessica12ryan/fpp-ListenLive/main/icon.png",
+	"versions": [
+		{
+			"minFPPVersion": "8.0",
+			"maxFPPVersion": "8.99",
+			"branch": "main",
+			"sha": "",
+			"allowUpdates": 1,
+			"dependencies": {
+				"plugins": [],
+				"packages": ["ffmpeg"],
+				"scripts": []
+			}
+		},
+		{
+			"minFPPVersion": "9.0",
+			"maxFPPVersion": "9.99",
+			"branch": "main",
+			"sha": "",
+			"allowUpdates": 1,
+			"dependencies": {
+				"plugins": [],
+				"packages": ["ffmpeg"],
+				"scripts": []
+			}
+		},
+		{
+			"minFPPVersion": "10.0",
+			"maxFPPVersion": "0",
+			"branch": "main",
+			"sha": "",
+			"allowUpdates": 1,
+			"dependencies": {
+				"plugins": [],
+				"packages": ["ffmpeg"],
+				"scripts": []
+			}
+		}
+	]
+}

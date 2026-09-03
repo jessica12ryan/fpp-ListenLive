@@ -1,0 +1,8 @@
+.DS_Store
+*.log
+
+/config/settings.json
+/config/stream.pid
+
+/media/
+/tmp/
