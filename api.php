@@ -251,6 +251,55 @@ function llGetFppStatus() {
     return null;
 }
 
+function llGetMultisyncElapsed() {
+    // Try to get multisync master elapsed for show sync
+    // FPP remotes sync to master via multisync; master time is authoritative
+    // Check common multisync endpoints and status fields
+    $candidates = [
+        'http://localhost/api/fppd/multisync',
+        'http://127.0.0.1/api/fppd/multisync',
+        'http://localhost/api/system/multisync',
+        'http://127.0.0.1/api/system/multisync',
+        'http://localhost/api/multisync/status',
+    ];
+    foreach ($candidates as $url) {
+        $json = null;
+        if (function_exists('curl_init')) {
+            $ch = curl_init($url);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 2);
+            $tmp = @curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            if ($tmp !== false && $code === 200 && $tmp !== '' && $tmp[0] === '{') $json = $tmp;
+        } else {
+            $ctx = stream_context_create(['http' => ['timeout' => 2]]);
+            $tmp = @file_get_contents($url, false, $ctx);
+            if ($tmp !== false && $tmp !== '' && $tmp[0] === '{') $json = $tmp;
+        }
+        if ($json) {
+            $data = json_decode($json, true);
+            if (is_array($data)) {
+                // Look for elapsed fields in various possible structures
+                foreach (['elapsed','seconds_elapsed','time_elapsed','masterElapsed','position'] as $k) {
+                    if (isset($data[$k]) && is_numeric($data[$k])) return (float)$data[$k];
+                    if (isset($data['master'][$k]) && is_numeric($data['master'][$k])) return (float)$data['master'][$k];
+                }
+            }
+        }
+    }
+    // Also check FPP status for multisync field (some versions embed master info)
+    $status = llGetFppStatus();
+    if ($status && isset($status['multisync'])) {
+        $ms = $status['multisync'];
+        if (is_array($ms)) {
+            foreach (['elapsed','seconds_elapsed','masterElapsed'] as $k) {
+                if (isset($ms[$k]) && is_numeric($ms[$k])) return (float)$ms[$k];
+            }
+        }
+    }
+    return null;
+}
+
 function llGetBackgroundMusicStatus() {
     $urls = [
         'http://localhost/api/plugin/fpp-plugin-BackgroundMusic/status',
@@ -346,15 +395,23 @@ function llGetFallbackMedia() {
             if (!empty($bg[$k])) $isPlaying = true;
             if (!empty($bg['data'][$k])) $isPlaying = true;
         }
+        // Extract elapsed for background — use trackElapsed if available (for sync)
+        $bgElapsed = 0;
+        foreach (['trackElapsed','elapsed','position','currentTime'] as $ek) {
+            if (isset($bg[$ek]) && is_numeric($bg[$ek])) { $bgElapsed = (float)$bg[$ek]; break; }
+            if (isset($bg['data'][$ek]) && is_numeric($bg['data'][$ek])) { $bgElapsed = (float)$bg['data'][$ek]; break; }
+        }
+        // Also check statusFile values: statusData elapsed is seconds
+        if ($bgElapsed == 0 && isset($bg['trackElapsed'])) $bgElapsed = (float)$bg['trackElapsed'];
         foreach ($candidates as $media) {
             $path = llGetMediaPath($media);
             if ($path && file_exists($path)) {
-                return ['path' => $path, 'type' => 'background', 'media' => $media, 'elapsed' => 0, 'bgStatus' => $bg];
+                return ['path' => $path, 'type' => 'background', 'media' => $media, 'elapsed' => $bgElapsed, 'bgStatus' => $bg];
             }
         }
         // If bg says playing but we couldn't find file, return bg status for diagnostics
         if ($isPlaying || !empty($candidates)) {
-            return ['path' => null, 'type' => 'background', 'media' => $candidates[0] ?? 'unknown', 'bgStatus' => $bg];
+            return ['path' => null, 'type' => 'background', 'media' => $candidates[0] ?? 'unknown', 'elapsed' => $bgElapsed, 'bgStatus' => $bg];
         }
         // Also check if bg has playlist details with current index
         if (isset($bg['playlistDetails']) || isset($bg['tracks'])) {
@@ -727,9 +784,20 @@ function llStreamFileSync($isExplicitFileMode) {
     while (ob_get_level() > 0) { @ob_end_clean(); }
 
     $fallback = llGetFallbackMedia();
-    $fppStatus = llGetFppStatus();
-    $elapsed = 0;
-    if ($fppStatus) $elapsed = (float)($fppStatus['seconds_elapsed'] ?? 0);
+    // Use fallback's elapsed (which for FPP is seconds_elapsed, for background is trackElapsed)
+    // This ensures sync with whatever source is active, including multisync-aware FPP timing
+    $elapsed = (float)($fallback['elapsed'] ?? 0);
+    // For FPP type, double-check multisync-aware elapsed from fresh status (fallback may be stale)
+    if ($fallback && $fallback['type'] === 'fpp') {
+        $fresh = llGetFppStatus();
+        if ($fresh && isset($fresh['seconds_elapsed'])) {
+            $elapsed = (float)$fresh['seconds_elapsed'];
+            // If FPP is MultiSync remote, try to get master time via /api/multisync/status
+            // Master time is more authoritative for show sync
+            $msElapsed = llGetMultisyncElapsed();
+            if ($msElapsed !== null) $elapsed = $msElapsed;
+        }
+    }
 
     // Handle after-hours internet stream — proxy it
     if ($fallback && $fallback['type'] === 'afterhours' && !empty($fallback['streamUrl'])) {

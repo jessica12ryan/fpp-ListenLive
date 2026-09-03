@@ -117,6 +117,7 @@ var llPlayer = {
     isPlaying: false,
     isMuted: false,
     preMuteVol: 80,
+    lastMedia: null,
     streamUrl: 'api/plugin/fpp-ListenLive/stream',
     // Append cache buster to force reconnect without browser cache
     buildUrl: function() { return llPlayer.streamUrl + '?t=' + Date.now(); },
@@ -305,10 +306,22 @@ var llPlayer = {
                 } else {
                     var elapsed = s.seconds_elapsed || s.time_elapsed || np.seconds_elapsed || 0;
                     var remaining = s.seconds_remaining || s.time_remaining || '';
+                    // For background/after-hours, use fallback elapsed (trackElapsed) for sync-accurate display
+                    if (isBackgroundPlaying) {
+                        if (d.fallback_media && typeof d.fallback_media.elapsed === 'number' && d.fallback_media.elapsed > 0) {
+                            elapsed = d.fallback_media.elapsed;
+                        } else if (d.background_status && typeof d.background_status.trackElapsed === 'number') {
+                            elapsed = d.background_status.trackElapsed;
+                            if (typeof d.background_status.trackDuration === 'number' && d.background_status.trackDuration > 0) {
+                                remaining = Math.max(0, d.background_status.trackDuration - elapsed);
+                            }
+                        }
+                        // Multisync: if background is via FPP playlist, elapsed is already multisync-aware
+                    }
                     $('#ll_nowplaying').text(media);
                     $('#ll_elapsed').text((elapsed || '0') + (remaining ? ' / ' + remaining : ''));
                     if (isBackgroundPlaying && !s.current_song) {
-                        $('#ll_nowplaying').html(escHtml(media) + ' <span class="ll-badge" style="background:#198754;color:#fff;font-size:11px;">via ' + escHtml(d.fallback_media.type) + '</span>');
+                        $('#ll_nowplaying').html(escHtml(media) + ' <span class="ll-badge" style="background:#198754;color:#fff;font-size:11px;">via ' + escHtml(d.fallback_media.type) + ' • sync</span>');
                     }
                 }
                 // Also show background status in playlist/sequence when idle
@@ -325,6 +338,24 @@ var llPlayer = {
                 }
                 $('#ll_src').text(settings.source || 'auto');
                 $('#ll_bitrate').text(settings.bitrate || '128k');
+
+                // Auto-reconnect when track changes while in file-sync mode (keeps file sync in sync with FPP/multisync)
+                var currentMediaKey = (media || '') + '|' + (s.current_playlist || '') + '|' + (d.fallback_media ? d.fallback_media.type : '') + '|' + (d.fallback_media ? d.fallback_media.media : '');
+                var isFileSync = !settings.enabled ? false : (settings.source === 'file' || (!det.pipewire && !det.pulse && !det.alsa));
+                // Also consider explicit file fallback: if live capture failed, detection may still show pipewire but stream is file-synced
+                // Use fallback type as hint: if active source is not live capture, treat as file sync
+                if (!isFileSync && d.fallback_media && d.fallback_media.type !== 'fpp') {
+                    // If we are playing background/afterhours via file, we are in file-sync even if live devices exist but failed probe
+                    // Check last probe result via diagnostics: if stream would fallback, stay in sync
+                    isFileSync = true;
+                }
+                if (llPlayer.isPlaying && llPlayer.lastMedia && llPlayer.lastMedia !== currentMediaKey && isFileSync) {
+                    $('#ll_status_text').html('<span class="text-warning">Track changed — re-syncing for multisync...</span>');
+                    llPlayer.lastMedia = currentMediaKey;
+                    setTimeout(function(){ llPlayer.reconnect(); }, 500);
+                } else {
+                    llPlayer.lastMedia = currentMediaKey;
+                }
 
                 if (!fppdReachable && !llPlayer.isPlaying && !isBackgroundPlaying) {
                     $('#ll_nowplaying').html('<span class="text-warning">FPPD not reachable — live capture still works, but Now Playing is unavailable. Check FPPD is running.</span>');
