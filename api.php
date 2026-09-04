@@ -570,9 +570,13 @@ function llBuildFfmpegCommand($settings, $detection) {
     // FPP runs as user 'fpp', apache/php-fpm also as 'fpp', but ensure XDG_RUNTIME_DIR and PIPEWIRE_REMOTE
     $envPrefix = '';
     // FPP 10 uses system-wide PipeWire at /run/pipewire-fpp — use it explicitly
-    // Do NOT use /run/user/* which is per-user and wrong for FPP's system service
     if (is_dir('/run/pipewire-fpp') || file_exists('/run/pipewire-fpp/pipewire-0')) {
-        $envPrefix = 'PIPEWIRE_REMOTE=/run/pipewire-fpp/pipewire-0 PIPEWIRE_RUNTIME_DIR=/run/pipewire-fpp XDG_RUNTIME_DIR=/run/pipewire-fpp ';
+        $envPrefix = 'PIPEWIRE_REMOTE=/run/pipewire-fpp/pipewire-0 PIPEWIRE_RUNTIME_DIR=/run/pipewire-fpp ';
+        // Do NOT set XDG_RUNTIME_DIR to /run/pipewire-fpp when running as fpp via sudo - it causes "not owned by us"
+        // Only set XDG if running as root without sudo
+        if (trim(@shell_exec('whoami 2>/dev/null') ?? '') === 'root') {
+            $envPrefix .= 'XDG_RUNTIME_DIR=/run/pipewire-fpp ';
+        }
     } else {
         $xdg = trim(@shell_exec('echo $XDG_RUNTIME_DIR 2>/dev/null') ?? '');
         if ($xdg === '') {
@@ -623,13 +627,15 @@ function llBuildFfmpegCommand($settings, $detection) {
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i default', 'pipewire-pulse:default'];
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 0', 'pulse:0'];
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 1', 'pulse:1'];
+            // OS-level capture: fpp_group_default is the main mix (show + background) — try as root (fpp gets Permission denied)
+            $pwSudo = trim(@shell_exec('sudo -n true 2>&1 && echo yes')) === 'yes' ? 'sudo ' : '';
             // OS-level capture: fpp_group_default is the main mix (show + background) — try it first
             if (@shell_exec('which pw-record 2>/dev/null')) {
                 foreach (['fpp_group_default','bgmusic_main','bgmusic_crossfade','fpp_alsa_audio','0'] as $tgt) {
-                    $attempts[] = [$sudoPrefix . $envPrefix . 'pw-record --target ' . escapeshellarg($tgt) . ' - 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:' . $tgt];
+                    $attempts[] = [$pwSudo . $envPrefix . 'pw-record --target ' . escapeshellarg($tgt) . ' - 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:' . $tgt];
                 }
                 // Also try without target (default source) which should be the monitor of the default sink
-                $attempts[] = [$sudoPrefix . $envPrefix . 'pw-record - --rate 48000 --channels 2 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:default'];
+                $attempts[] = [$pwSudo . $envPrefix . 'pw-record - --rate 48000 --channels 2 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:default'];
             }
         }
         // Then Pulse
