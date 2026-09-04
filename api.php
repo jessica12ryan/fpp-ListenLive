@@ -770,42 +770,75 @@ function llStreamEndpoint() {
     }
 
     // Probe live capture candidates WITHOUT sending headers yet — find first that yields data
+    // Use proc_open to capture stderr for detailed logging when probe fails
     $cmds = llBuildFfmpegCommand($settings, $detection);
     $probeResult = null;
     foreach ($cmds as $pair) {
         [$cmd, $label] = $pair;
-        $handle = @popen($cmd . ' 2>/dev/null', 'r');
-        if (!$handle) {
-            llLog('Stream probe failed to popen: ' . $label);
+        // Use proc_open so we can capture ffmpeg stderr for diagnostics
+        $descriptors = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w']
+        ];
+        $env = null;
+        // Ensure correct env for pipewire/pulse
+        $proc = @proc_open($cmd, $descriptors, $pipes, null, $env);
+        if (!is_resource($proc)) {
+            llLog('Stream probe failed to proc_open: ' . $label . ' cmd=' . $cmd);
             continue;
         }
-        stream_set_blocking($handle, false);
+        // Close stdin immediately
+        fclose($pipes[0]);
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
         $start = microtime(true);
         $gotData = false;
         $buffer = '';
-        while (microtime(true) - $start < 1.2) {
-            $chunk = fread($handle, 8192);
+        $stderr = '';
+        while (microtime(true) - $start < 1.8) {
+            $chunk = fread($pipes[1], 8192);
             if ($chunk !== false && $chunk !== '') {
                 $buffer .= $chunk;
                 $gotData = true;
                 break;
             }
-            // Check if process died (no data and EOF)
-            if (feof($handle)) break;
-            usleep(40000);
+            // Collect stderr non-blocking
+            $errChunk = fread($pipes[2], 4096);
+            if ($errChunk !== false && $errChunk !== '') $stderr .= $errChunk;
+            // Check if process died
+            $status = proc_get_status($proc);
+            if (!$status['running'] && feof($pipes[1])) break;
+            usleep(50000);
             if (connection_aborted()) {
-                pclose($handle);
+                proc_terminate($proc, 9);
+                fclose($pipes[1]);
+                fclose($pipes[2]);
+                proc_close($proc);
                 exit;
             }
         }
-        if ($gotData) {
-            // Success — we have a working capture source
-            $probeResult = ['handle' => $handle, 'label' => $label, 'buffer' => $buffer, 'cmd' => $cmd];
-            break;
+        // Collect any remaining stderr
+        $extraErr = stream_get_contents($pipes[2]);
+        if ($extraErr) $stderr .= $extraErr;
+        // Clean up stderr pipe, keep stdout pipe open for streaming if we succeeded
+        if (!$gotData) {
+            // No data — log detailed reason
+            $status = proc_get_status($proc);
+            $exitCode = $status['exitcode'] ?? -1;
+            $stderrTrim = trim(substr($stderr, 0, 1200));
+            // Also try a quick diagnostic: is device busy, permission, etc.
+            llLog('Stream probe no data: ' . $label . ' exit=' . $exitCode . ' stderr=' . ($stderrTrim ?: '(empty)') . ' cmd=' . $cmd);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            proc_close($proc);
+            continue;
         }
-        pclose($handle);
-        llLog('Stream probe no data: ' . $label);
-        // Continue to next candidate
+        // Success — keep stdout pipe open, close stderr, and keep proc for streaming
+        // For streaming we need to keep the proc open; store pipes and proc
+        fclose($pipes[2]);
+        $probeResult = ['handle' => $pipes[1], 'proc' => $proc, 'label' => $label, 'buffer' => $buffer, 'cmd' => $cmd];
+        break;
     }
 
     if ($probeResult) {
@@ -827,6 +860,7 @@ function llStreamEndpoint() {
         ob_implicit_flush(1);
 
         $handle = $probeResult['handle'];
+        $proc = $probeResult['proc'] ?? null;
         $label = $probeResult['label'];
         $buffer = $probeResult['buffer'];
 
@@ -843,6 +877,11 @@ function llStreamEndpoint() {
                 flush();
                 usleep(5000);
             } else {
+                // Check if proc died
+                if ($proc) {
+                    $st = proc_get_status($proc);
+                    if (!$st['running']) break;
+                } else if (feof($handle)) break;
                 usleep(10000);
             }
             if (connection_aborted()) break;
@@ -850,14 +889,23 @@ function llStreamEndpoint() {
         // Check why we exited — log for debugging drops after ~60s
         $aborted = connection_aborted();
         $eof = feof($handle);
-        pclose($handle);
-        llLog('Stream ended live: ' . $label . ' eof=' . ($eof?1:0) . ' aborted=' . ($aborted?1:0) . ' status=' . connection_status());
-        // If we exited due to EOF (ffmpeg died) but client still wants audio, try file sync instead of silent close
-        if ($eof && !$aborted && connection_status() === CONNECTION_NORMAL) {
-            llLog('Stream live EOF but client still connected — trying file sync fallback');
-            return llStreamFileSync(false);
+        if ($proc) {
+            // proc_open path
+            fclose($handle);
+            $exitCode = 0;
+            $status = proc_get_status($proc);
+            if ($status['running']) {
+                proc_terminate($proc, 9);
+            }
+            proc_close($proc);
+            llLog('Stream ended live: ' . $label . ' eof=' . ($eof?1:0) . ' aborted=' . ($aborted?1:0) . ' status=' . connection_status() . ' exit=' . $exitCode);
+            // Fallback is disabled per user request — just exit, don't try file sync
+            exit;
+        } else {
+            pclose($handle);
+            llLog('Stream ended live: ' . $label . ' eof=' . ($eof?1:0) . ' aborted=' . ($aborted?1:0) . ' status=' . connection_status());
+            exit;
         }
-        exit;
     }
 
     // Live capture failed for all candidates — no fallback per user request
