@@ -686,17 +686,15 @@ function llStatusEndpoint() {
             $nowPlaying['media'] = $fppStatus['current_sequence'];
         }
     }
-    // Augment nowPlaying with background/after-hours if FPP idle but they are active
+    // No fallback augmentation per user request — live capture only
+    // What is outputted from FPP (including background mixed via PipeWire) is what should be played
     $activeSource = 'fpp';
-    if (!$fppStatus || empty($fppStatus['current_song'])) {
-        if ($fallback) {
-            $activeSource = $fallback['type'];
-            if ($fallback['media']) {
-                if (!$nowPlaying) $nowPlaying = [];
-                $nowPlaying['media'] = $fallback['media'];
-                $nowPlaying['activeSource'] = $fallback['type'];
-            }
-        }
+    if ($fppStatus && !empty($fppStatus['current_song'])) {
+        $activeSource = 'fpp';
+    } elseif ($fppStatus) {
+        $activeSource = $fppStatus['status_name'] ?? 'idle';
+    } else {
+        $activeSource = 'unavailable';
     }
     return llJson([
         'success' => true,
@@ -751,20 +749,24 @@ function llStreamEndpoint() {
         return llJson(['success' => false, 'error' => 'Listen Live is disabled in plugin settings. Enable it in Content Setup → Listen Live → Config.']);
     }
 
-    // If user explicitly chose file mode, go straight to file sync (including background/after-hours)
+    // File mode is deprecated — live capture is the only supported mode per user request
+    // What is outputted from FPP is what should be played, otherwise stream is unavailable
     $source = $settings['source'] ?? 'auto';
     if ($source === 'file') {
-        llLog('Stream: file mode requested, trying file sync including background/after-hours');
-        return llStreamFileSync(true);
+        header('HTTP/1.1 503 Service Unavailable');
+        header('Content-Type: application/json');
+        llLog('Stream rejected: file mode is disabled (live capture only)');
+        return llJson(['success' => false, 'error' => 'File fallback is disabled. Stream is only available via live capture. Set Audio Source to Auto and ensure PipeWire/Pulse or ALSA capture is available.']);
     }
 
     $detection = llDetectAudioSources();
     $ffmpeg = $detection['ffmpeg'];
 
-    // If ffmpeg missing, immediately try file sync
     if (!$ffmpeg) {
-        llLog('Stream fallback: ffmpeg not found, trying file sync');
-        return llStreamFileSync(false);
+        header('HTTP/1.1 503 Service Unavailable');
+        header('Content-Type: application/json');
+        llLog('Stream unavailable: ffmpeg not found');
+        return llJson(['success' => false, 'error' => 'FFmpeg not found. Install ffmpeg (sudo apt install ffmpeg) and ensure live capture is available. No fallback to file.']);
     }
 
     // Probe live capture candidates WITHOUT sending headers yet — find first that yields data
@@ -858,9 +860,16 @@ function llStreamEndpoint() {
         exit;
     }
 
-    // Live capture failed for all candidates — fall back to file sync (FPP + background + after-hours)
-    llLog('Stream live capture failed for all candidates, trying file sync fallback');
-    return llStreamFileSync(false);
+    // Live capture failed for all candidates — no fallback per user request
+    llLog('Stream live capture failed for all candidates — no fallback, stream unavailable');
+    header('HTTP/1.1 503 Service Unavailable');
+    header('Content-Type: application/json');
+    $hint = 'Live capture failed. Tried: ' . implode(', ', array_map(fn($c)=>$c[1], $cmds));
+    if (!$detection['pipewire'] && !$detection['pulse'] && !$detection['alsa']) {
+        $hint .= ' — no capture devices detected. Ensure PipeWire/Pulse is running and FPP audio is configured.';
+    }
+    // Include hint about fallback being disabled
+    return llJson(['success' => false, 'error' => 'Stream unavailable — live capture failed and fallback is disabled.', 'details' => $hint, 'hint' => 'What is outputted from FPP is what should be played. Check Diagnostics tab for capture devices.']);
 }
 
 function llStreamFileSync($isExplicitFileMode) {

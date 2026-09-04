@@ -419,23 +419,30 @@ var llPlayer = {
                         $('#ll_badge').removeClass('ll-badge-live ll-badge-warn').addClass('ll-badge-idle').text('Idle');
                     }
                 }
-                // Now playing — also check background/after-hours when FPP idle
-                // Handle current_playlist being an object like {"count":"0","playlist":""} when idle
+                // Now playing — also check background/after-hours when FPP idle for display only
+                // (stream is live capture only, but UI should still show background track when FPP idle)
                 var rawPlaylist = s.current_playlist;
                 var playlistStr = '';
                 if (typeof rawPlaylist === 'string') playlistStr = rawPlaylist;
                 else if (rawPlaylist && typeof rawPlaylist === 'object' && rawPlaylist.playlist) playlistStr = rawPlaylist.playlist;
                 var media = s.current_song || s.current_sequence || playlistStr || '';
                 if (typeof media === 'object') {
-                    // Only stringify if it has meaningful content
                     if (media.playlist || media.count !== "0") media = JSON.stringify(media);
                     else media = '';
                 }
-                // Fallback to background/after-hours media when FPP idle
+                // For UI badge/display, consider background active, but don't use fallback for streaming
+                if (d.background_status && d.background_status.backgroundMusicRunning) isBackgroundPlaying = true;
+                if (d.afterhours_status && d.afterhours_status.status === true) isBackgroundPlaying = true;
+                // Fallback to background/after-hours media for DISPLAY only when FPP idle (stream remains live capture)
                 if ((!media || media === 'false' || media === '') && d.fallback_media && d.fallback_media.media) {
-                    media = d.fallback_media.media + ' (' + d.fallback_media.type + ')';
-                    if (d.fallback_media.type === 'background') isBackgroundPlaying = true;
-                    if (d.fallback_media.type === 'afterhours') isBackgroundPlaying = true;
+                    // Only for display, not for streaming logic
+                    var dispMedia = d.fallback_media.media + ' (' + d.fallback_media.type + ')';
+                    // Show in nowplaying if FPP idle
+                    if (!s.current_song && !s.current_sequence && !playlistStr) {
+                        media = dispMedia;
+                        if (d.fallback_media.type === 'background') isBackgroundPlaying = true;
+                        if (d.fallback_media.type === 'afterhours') isBackgroundPlaying = true;
+                    }
                 }
                 if (!media || media === 'false' || media === '') {
                     $('#ll_nowplaying').html('<span class="text-secondary">Nothing playing — FPP is idle</span>');
