@@ -609,15 +609,13 @@ function llBuildFfmpegCommand($settings, $detection) {
                 };
                 return $score($a) - $score($b);
             });
-            // Force fpp_group_default.monitor first if we know it exists (seen on this host)
+            // Force fpp_group_default.monitor first if we know it exists (seen on this host) — use root for PipeWire
             $forced = ['fpp_group_default.monitor','fpp_alsa_audio.monitor','fpp_fx_g1_audio.monitor'];
             foreach ($forced as $f) {
                 if (in_array($f, $monitors)) {
-                    // Move to front
                     $monitors = array_merge([$f], array_diff($monitors, [$f]));
                 } else {
-                    // Try it anyway even if not in detection (may be present but not listed via API)
-                    $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($f), 'pipewire-pulse:' . $f];
+                    $attempts[] = [$sudoRootPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($f), 'pipewire-pulse:' . $f];
                 }
             }
             // OS-level capture via pw-record as root — most reliable for FPP's system PipeWire (fpp user gets Permission denied)
