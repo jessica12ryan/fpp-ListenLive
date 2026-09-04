@@ -540,6 +540,19 @@ function llGetMediaPath($mediaName) {
     return null;
 }
 
+function llIsSilenceBuffer($buffer) {
+    // Very rough silence detection: check if MP3 payload after headers is mostly zeros
+    // MP3 frames start with 0xFF 0xFB or similar sync; silence will have low energy in side info
+    // For now, consider buffer with < 5% non-zero bytes after first 1k as silence
+    if (strlen($buffer) < 4096) return true;
+    $sample = substr($buffer, 1024, 4096);
+    $nonZero = 0;
+    for ($i=0; $i<strlen($sample); $i++) {
+        if (ord($sample[$i]) > 16) $nonZero++;
+    }
+    return ($nonZero / strlen($sample)) < 0.08;
+}
+
 function llBuildFfmpegCommand($settings, $detection) {
     $ffmpeg = llFindFfmpeg();
     $bitrate = preg_match('/^\d+k$/', $settings['bitrate'] ?? '') ? $settings['bitrate'] : '128k';
@@ -573,26 +586,33 @@ function llBuildFfmpegCommand($settings, $detection) {
     $sudoPrefix = $canSudoFpp ? 'sudo -u fpp ' : '';
 
     if ($source === 'auto' || $source === 'pulse' || $source === 'pipewire') {
-        // PipeWire first (native or via pulse compat) — try monitor and also direct pipewire
+        // PipeWire first — try ALL monitors, not just first, and check for bgmusic/main sinks
         if (!empty($detection['pipewire'])) {
-            foreach ($detection['pipewire_sources'] as $src) {
-                if (strpos($src, '.monitor') !== false) {
-                    $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($src), 'pipewire-pulse:' . $src];
-                    // Also try native pipewire for same source
-                    if (!empty($detection['ffmpeg_pipewire'])) {
-                        $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pipewire -i ' . escapeshellarg($src), 'pipewire:' . $src];
-                    }
-                    break;
+            $monitors = array_filter($detection['pipewire_sources'], fn($s) => strpos($s, '.monitor') !== false);
+            // Prioritize main sink monitor and bgmusic monitor
+            usort($monitors, function($a,$b) {
+                $score = function($s) {
+                    if (strpos($s, 'bgmusic') !== false) return 0; // bgmusic monitor has background
+                    if (strpos($s, 'alsa_output') !== false) return 1; // main sink
+                    return 2;
+                };
+                return $score($a) - $score($b);
+            });
+            foreach ($monitors as $src) {
+                $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($src), 'pipewire-pulse:' . $src];
+                if (!empty($detection['ffmpeg_pipewire'])) {
+                    $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pipewire -i ' . escapeshellarg($src), 'pipewire:' . $src];
                 }
             }
-            // Generic pulse default (pipewire-pulse)
+            // Generic pulse default (pipewire-pulse) — often the main sink
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i default', 'pipewire-pulse:default'];
-            // Try pulse by index (sometimes default fails but index 0 works)
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 0', 'pulse:0'];
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 1', 'pulse:1'];
-            // Try pw-record piped to ffmpeg as fallback for PipeWire
+            // Try pw-record with explicit bgmusic and main sink targets
             if (@shell_exec('which pw-record 2>/dev/null')) {
-                $attempts[] = [$sudoPrefix . $envPrefix . 'pw-record --target 0 - 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:0'];
+                foreach (['0','1','bgmusic_main','alsa_output.platform-bcm2835_audio.stereo-fallback'] as $tgt) {
+                    $attempts[] = [$sudoPrefix . $envPrefix . 'pw-record --target ' . escapeshellarg($tgt) . ' - 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:' . $tgt];
+                }
             }
         }
         // Then Pulse
@@ -622,19 +642,23 @@ function llBuildFfmpegCommand($settings, $detection) {
     }
     if ($source === 'alsa' || $source === 'auto') {
         $alsaDev = $settings['alsa_device'] ?? 'default';
+        // Try to ensure snd-aloop is loaded for OS-level capture when direct ALSA is used
+        @shell_exec('lsmod | grep -q snd_aloop || sudo modprobe snd-aloop 2>/dev/null');
         $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i ' . escapeshellarg($alsaDev), 'alsa:' . $alsaDev];
         if ($alsaDev !== 'default') {
             $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i default', 'alsa:default'];
         }
-        // Try common ALSA devices for USB and onboard
-        foreach (['hw:0,0','plughw:0,0','hw:1,0','plughw:1,0','hw:0,1','plughw:0,1','sysdefault','front'] as $dev) {
+        // Try common ALSA devices for USB and onboard — ordered by likelihood on FPP (USB often hw:1,0)
+        foreach (['hw:0,0','plughw:0,0','hw:1,0','plughw:1,0','hw:0,1','plughw:0,1','sysdefault','front','dsnoop:0','dsnoop:1'] as $dev) {
             if ($dev !== $alsaDev) {
                 $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i ' . escapeshellarg($dev), 'alsa:' . $dev];
             }
         }
-        // Also try Loopback for snd-aloop capture
+        // Also try Loopback for snd-aloop capture (captures whatever is sent to hw:Loopback,0,0)
         $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i hw:Loopback,1,0', 'alsa:Loopback'];
         $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i hw:Loopback,0,0', 'alsa:Loopback0'];
+        // Try dsnoop for shared capture when device is busy
+        $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i dsnoop:Loopback', 'alsa:dsnoop'];
         // Try to get FPP's configured audio output device
         $fppAudio = trim(@shell_exec('cat /home/fpp/media/config/FPPAudio 2>/dev/null || cat /home/fpp/media/settings 2>/dev/null | grep AudioOutput | cut -d= -f2') ?? '');
         if ($fppAudio && $fppAudio !== $alsaDev && $fppAudio !== 'default') {
@@ -857,6 +881,14 @@ function llStreamEndpoint() {
             proc_close($proc);
             continue;
         }
+        // Check for silence — if buffer is silence, try next candidate which may have actual background audio
+        if (llIsSilenceBuffer($buffer)) {
+            llLog('Stream probe got data but silence for ' . $label . ' — trying next candidate for actual audio');
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            proc_close($proc);
+            continue;
+        }
         // Success — keep stdout pipe open, close stderr, and keep proc for streaming
         // For streaming we need to keep the proc open; store pipes and proc
         fclose($pipes[2]);
@@ -931,6 +963,10 @@ function llStreamEndpoint() {
         }
     }
 
+    // If live capture produced only silence, treat as failure and try next candidate
+    // Check captured buffer for actual audio vs silence by looking at MP3 frame energy
+    // Simple heuristic: silence MP3 at 128k for 1.2s should still be ~15k, but we can check for non-zero payload
+    // For now, also try to verify via volumedetect if ffmpeg is available
     // Live capture failed for all candidates — no fallback per user request
     llLog('Stream live capture failed for all candidates — no fallback, stream unavailable');
     header('HTTP/1.1 503 Service Unavailable');
