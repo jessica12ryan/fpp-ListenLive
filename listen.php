@@ -123,6 +123,8 @@ var llPlayer = {
     driftChecks: 0,
     reconnectAttempts: 0,
     stalledTimer: null,
+    waitingTimer: null,
+    trackChangePending: false,
     streamUrl: 'api/plugin/fpp-ListenLive/stream',
     // Append cache buster to force reconnect without browser cache
     buildUrl: function() { return llPlayer.streamUrl + '?t=' + Date.now(); },
@@ -144,6 +146,9 @@ var llPlayer = {
         llPlayer.audio.addEventListener('playing', function() {
             llPlayer.isPlaying = true;
             llPlayer.reconnectAttempts = 0;
+            llPlayer.trackChangePending = false;
+            clearTimeout(llPlayer.stalledTimer);
+            clearTimeout(llPlayer.waitingTimer);
             // Reset sync tracking — will be set on next status poll with current elapsed
             llPlayer.streamStartElapsed = null;
             llPlayer.streamStartTime = Date.now();
@@ -221,26 +226,41 @@ var llPlayer = {
             }
         });
         llPlayer.audio.addEventListener('stalled', function() {
-            $('#ll_status_text').html('<span class="text-warning">Buffering...</span>');
+            if (llPlayer.trackChangePending) return;
             clearTimeout(llPlayer.stalledTimer);
             llPlayer.stalledTimer = setTimeout(function(){
-                if (llPlayer.audio.readyState < 2 && llPlayer.isPlaying) {
-                    // Don't reconnect if a track-change reconnect is already pending (lastMedia just changed)
-                    $('#ll_status_text').html('<span class="text-warning">Buffering timeout — re-syncing...</span>');
-                    llPlayer.reconnect();
+                if (llPlayer.audio.readyState < 2 && llPlayer.isPlaying && !llPlayer.audio.paused && !llPlayer.trackChangePending) {
+                    $('#ll_status_text').html('<span class="text-warning">Buffering...</span>');
+                    clearTimeout(llPlayer.stalledTimer);
+                    llPlayer.stalledTimer = setTimeout(function(){
+                        if (llPlayer.audio.readyState < 2 && llPlayer.isPlaying && !llPlayer.trackChangePending) {
+                            $('#ll_status_text').html('<span class="text-warning">Buffering timeout — re-syncing...</span>');
+                            llPlayer.reconnect();
+                        }
+                    }, 4000);
                 }
-            }, 6000);
+            }, 800);
         });
         llPlayer.audio.addEventListener('waiting', function() {
-            $('#ll_status_text').html('<span class="text-warning">Buffering...</span>');
+            if (llPlayer.trackChangePending) return;
+            clearTimeout(llPlayer.waitingTimer);
+            llPlayer.waitingTimer = setTimeout(function(){
+                if (llPlayer.audio.readyState < 3 && llPlayer.isPlaying && !llPlayer.audio.paused && !llPlayer.trackChangePending) {
+                    $('#ll_status_text').html('<span class="text-warning">Buffering...</span>');
+                }
+            }, 800);
         });
         llPlayer.audio.addEventListener('canplay', function() {
             clearTimeout(llPlayer.stalledTimer);
+            clearTimeout(llPlayer.waitingTimer);
+            if ($('#ll_status_text').text().indexOf('Buffering') !== -1 && llPlayer.isPlaying) {
+                $('#ll_status_text').html('<span class="text-success">● Streaming live audio</span>');
+            }
         });
         llPlayer.audio.addEventListener('progress', function() {
-            // Clear buffering state when progress resumes
             if (llPlayer.audio.readyState >= 3) {
                 clearTimeout(llPlayer.stalledTimer);
+                clearTimeout(llPlayer.waitingTimer);
             }
         });
         llPlayer.refreshStatus();
@@ -347,8 +367,17 @@ var llPlayer = {
                     }
                 }
                 // Now playing — also check background/after-hours when FPP idle
-                var media = s.current_song || s.current_sequence || s.current_playlist || '';
-                if (typeof media === 'object') media = JSON.stringify(media);
+                // Handle current_playlist being an object like {"count":"0","playlist":""} when idle
+                var rawPlaylist = s.current_playlist;
+                var playlistStr = '';
+                if (typeof rawPlaylist === 'string') playlistStr = rawPlaylist;
+                else if (rawPlaylist && typeof rawPlaylist === 'object' && rawPlaylist.playlist) playlistStr = rawPlaylist.playlist;
+                var media = s.current_song || s.current_sequence || playlistStr || '';
+                if (typeof media === 'object') {
+                    // Only stringify if it has meaningful content
+                    if (media.playlist || media.count !== "0") media = JSON.stringify(media);
+                    else media = '';
+                }
                 // Fallback to background/after-hours media when FPP idle
                 if ((!media || media === 'false' || media === '') && d.fallback_media && d.fallback_media.media) {
                     media = d.fallback_media.media + ' (' + d.fallback_media.type + ')';
@@ -397,17 +426,17 @@ var llPlayer = {
                 // Auto-reconnect when track changes while in file-sync mode
                 // Live PipeWire/Pulse capture is gapless and mixes background correctly — no reconnect needed there
                 var currentMediaKey = (media || '') + '|' + (s.current_playlist || '') + '|' + (d.fallback_media ? d.fallback_media.type : '') + '|' + (d.fallback_media ? d.fallback_media.media : '');
-                var isFileSync = !settings.enabled ? false : (settings.source === 'file' || (!det.pipewire && !det.pulse && !det.alsa));
-                // Only force file-sync for background if live devices are actually unavailable
-                // If live monitor is available, background is already mixed in live capture — no need to re-sync on track change
+                var isFileSync = !settings.enabled ? false : (settings.source === 'file' || !det.liveAvailable);
                 if (llPlayer.isPlaying && llPlayer.lastMedia && llPlayer.lastMedia !== currentMediaKey && isFileSync) {
                     $('#ll_status_text').html('<span class="text-warning">Track changed — re-syncing...</span>');
-                    // Reset drift tracking for new track; wait a bit longer for new file to be ready (background crossfade = 3s)
+                    // Reset drift tracking for new track
                     llPlayer.streamStartElapsed = null;
                     llPlayer.streamStartTime = null;
                     llPlayer.driftChecks = 0;
+                    llPlayer.trackChangePending = true;
                     llPlayer.lastMedia = currentMediaKey;
                     clearTimeout(llPlayer.stalledTimer);
+                    clearTimeout(llPlayer.waitingTimer);
                     setTimeout(function(){
                         // Double-check new track still current before reconnect (avoid flapping if status hasn't settled)
                         $.ajax({
@@ -431,7 +460,7 @@ var llPlayer = {
                 }
 
                 // Drift correction for file-sync (keeps background/FPP file sync in sync with show)
-                if (llPlayer.isPlaying && isFileSync && llPlayer.audio && !llPlayer.audio.paused && llPlayer.audio.readyState >= 2) {
+                if (llPlayer.isPlaying && isFileSync && !llPlayer.trackChangePending && llPlayer.audio && !llPlayer.audio.paused && llPlayer.audio.readyState >= 2) {
                     var currentFallbackElapsed = 0;
                     if (d.fallback_media && typeof d.fallback_media.elapsed === 'number') currentFallbackElapsed = d.fallback_media.elapsed;
                     else if (typeof s.seconds_elapsed === 'number') currentFallbackElapsed = s.seconds_elapsed;
@@ -471,7 +500,9 @@ var llPlayer = {
                     $('#ll_nowplaying').html('<span class="text-warning">FPPD not reachable — live capture still works, but Now Playing is unavailable. Check FPPD is running.</span>');
                 }
 
-                if (!settings.enabled) {
+                if (llPlayer.trackChangePending) {
+                    // Keep "Track changed — re-syncing..." until new stream starts
+                } else if (!settings.enabled) {
                     $('#ll_status_text').html('<span class="text-danger">Plugin disabled — enable in Config tab</span>');
                 } else if (llPlayer.isPlaying) {
                     $('#ll_status_text').html('<span class="text-success">● Streaming live audio</span>' + (fppdReachable ? '' : ' <span class="text-warning" style="font-size:12px;">(FPPD unreachable)</span>') + (isBackgroundPlaying ? ' <span class="text-secondary" style="font-size:12px;">(background)</span>' : ''));

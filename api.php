@@ -67,7 +67,8 @@ function llDetectAudioSources() {
         'pipewire' => false,
         'pipewire_sources' => [],
         'alsa' => false,
-        'alsa_devices' => []
+        'alsa_devices' => [],
+        'liveAvailable' => false
     ];
     $ffmpeg = llFindFfmpeg();
     $result['ffmpeg_path'] = $ffmpeg;
@@ -201,6 +202,8 @@ function llDetectAudioSources() {
     $result['pulse_sources'] = array_values(array_unique($result['pulse_sources']));
     $result['pipewire_sources'] = array_values(array_unique($result['pipewire_sources']));
     $result['alsa_devices'] = array_values(array_unique($result['alsa_devices']));
+    // Live capture is available if ffmpeg exists and at least one audio backend is present
+    $result['liveAvailable'] = $result['ffmpeg'] && ($result['pipewire'] || $result['pulse'] || $result['alsa']);
     return $result;
 }
 
