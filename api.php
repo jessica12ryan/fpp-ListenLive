@@ -208,28 +208,24 @@ function llDetectAudioSources() {
 }
 
 function llGetFppStatus() {
-    // Use fppd's direct HTTP (port 32322, no /api prefix) to avoid Apache deadlock
-    // When this plugin's status is requested via Apache, a nested curl to localhost:80/api/fppd/status
-    // would deadlock if Apache has no free workers. Direct to fppd avoids that.
+    // Use fppd's direct HTTP (port 32322) to avoid Apache deadlock, with very short timeout
+    // If fppd is not responding quickly, return default idle status to avoid hanging the FPP UI
     $urls = [
         'http://127.0.0.1:32322/fppd/status',
         'http://localhost:32322/fppd/status',
-        'http://127.0.0.1/api/fppd/status',
-        'http://localhost/api/fppd/status',
     ];
 
-    // Prefer curl if available — more reliable than allow_url_fopen
+    // Prefer curl with very short timeout to avoid hanging FPP UI
     if (function_exists('curl_init')) {
         foreach ($urls as $url) {
             $ch = curl_init($url);
             curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_TIMEOUT, 3);
-            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 1);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 1);
             curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
             curl_setopt($ch, CURLOPT_HTTPHEADER, ['Accept: application/json']);
             $json = @curl_exec($ch);
             $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            // curl_close is no-op since PHP 8.0, avoid deprecated warning
             if (function_exists('curl_close') && version_compare(PHP_VERSION, '8.0', '<')) {
                 @curl_close($ch);
             }
@@ -239,21 +235,10 @@ function llGetFppStatus() {
             }
         }
     }
-
-    // Fallback: file_get_contents
-    foreach ($urls as $url) {
-        $ctx = stream_context_create(['http' => ['timeout' => 2, 'ignore_errors' => true, 'header' => "Accept: application/json\r\n"]]);
-        $json = @file_get_contents($url, false, $ctx);
-        if ($json !== false && $json !== '') {
-            $data = json_decode($json, true);
-            if (is_array($data)) return $data;
-        }
-    }
-
-    // Last resort: try reading FPP status via local file (some FPP versions cache it)
-    // or via fpp command line; return null if truly unreachable — caller should handle gracefully
+    // No fallback to Apache — would deadlock, return null quickly to keep UI responsive
     return null;
 }
+
 
 function llGetMultisyncElapsed() {
     // Try to get multisync master elapsed for show sync
