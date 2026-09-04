@@ -587,9 +587,12 @@ function llBuildFfmpegCommand($settings, $detection) {
             $envPrefix .= 'PIPEWIRE_REMOTE=/run/user/1000/pipewire-0 ';
         }
     }
-    // If we can sudo to fpp, that ensures correct pulse/pipewire perms (harmless if already fpp)
+    // For PipeWire system service, fpp user gets Permission denied even though in audio group
+    // Use sudo (as root) for PipeWire, and sudo -u fpp for ALSA/pulse where needed
+    $canSudo = trim(@shell_exec('sudo -n true 2>&1 && echo yes') ?? '') === 'yes';
     $canSudoFpp = trim(@shell_exec('sudo -n -u fpp true 2>&1 && echo yes') ?? '') === 'yes';
     $sudoPrefix = $canSudoFpp ? 'sudo -u fpp ' : '';
+    $sudoRootPrefix = $canSudo ? 'sudo ' : '';
 
     if ($source === 'auto' || $source === 'pulse' || $source === 'pipewire') {
         // PipeWire first — prioritize the actual FPP mix (fpp_group_default.monitor) which carries show + background
@@ -626,15 +629,16 @@ function llBuildFfmpegCommand($settings, $detection) {
                 $attempts[] = [$pwSudo . $envPrefix . 'pw-record - --rate 48000 --channels 2 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:default'];
             }
             foreach ($monitors as $src) {
-                $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($src), 'pipewire-pulse:' . $src];
+                // Use sudo (as root) for PipeWire monitors — fpp gets Permission denied on system socket
+                $attempts[] = [$sudoRootPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($src), 'pipewire-pulse:' . $src];
                 if (!empty($detection['ffmpeg_pipewire'])) {
-                    $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pipewire -i ' . escapeshellarg($src), 'pipewire:' . $src];
+                    $attempts[] = [$sudoRootPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pipewire -i ' . escapeshellarg($src), 'pipewire:' . $src];
                 }
             }
-            // Generic pulse default (pipewire-pulse) — often the main sink
-            $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i default', 'pipewire-pulse:default'];
-            $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 0', 'pulse:0'];
-            $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 1', 'pulse:1'];
+            // Generic pulse default (pipewire-pulse)
+            $attempts[] = [$sudoRootPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i default', 'pipewire-pulse:default'];
+            $attempts[] = [$sudoRootPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 0', 'pulse:0'];
+            $attempts[] = [$sudoRootPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 1', 'pulse:1'];
         }
         // Then Pulse
         if (!empty($detection['pulse'])) {
