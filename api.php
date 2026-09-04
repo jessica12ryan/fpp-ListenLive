@@ -594,10 +594,11 @@ function llBuildFfmpegCommand($settings, $detection) {
             usort($monitors, function($a,$b) {
                 $score = function($s) {
                     if (strpos($s, 'fpp_group_default.monitor') !== false) return 0;
-                    if (strpos($s, 'fpp_') !== false && strpos($s, '.monitor') !== false) return 1;
-                    if (strpos($s, 'bgmusic') !== false) return 0;
-                    if (strpos($s, 'alsa_output') !== false) return 2;
-                    return 3;
+                    if (strpos($s, 'fpp_alsa_audio.monitor') !== false) return 1;
+                    if (strpos($s, 'fpp_fx') !== false) return 2;
+                    if (strpos($s, 'bgmusic') !== false) return 1;
+                    if (strpos($s, 'alsa_output') !== false) return 3;
+                    return 4;
                 };
                 return $score($a) - $score($b);
             });
@@ -622,11 +623,13 @@ function llBuildFfmpegCommand($settings, $detection) {
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i default', 'pipewire-pulse:default'];
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 0', 'pulse:0'];
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 1', 'pulse:1'];
-            // Try pw-record with explicit bgmusic and main sink targets — bgmusic_main first for background
+            // OS-level capture: fpp_group_default is the main mix (show + background) — try it first
             if (@shell_exec('which pw-record 2>/dev/null')) {
-                foreach (['bgmusic_main','bgmusic_crossfade','fpp_group_default','0','1'] as $tgt) {
+                foreach (['fpp_group_default','bgmusic_main','bgmusic_crossfade','fpp_alsa_audio','0'] as $tgt) {
                     $attempts[] = [$sudoPrefix . $envPrefix . 'pw-record --target ' . escapeshellarg($tgt) . ' - 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:' . $tgt];
                 }
+                // Also try without target (default source) which should be the monitor of the default sink
+                $attempts[] = [$sudoPrefix . $envPrefix . 'pw-record - --rate 48000 --channels 2 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:default'];
             }
         }
         // Then Pulse
