@@ -819,26 +819,23 @@ function llStreamEndpoint() {
         return llJson(['success' => false, 'error' => 'Listen Live is disabled in plugin settings. Enable it in Content Setup → Listen Live → Config.']);
     }
 
-    // File mode is deprecated — live capture is the only supported mode per user request
-    // What is outputted from FPP is what should be played, otherwise stream is unavailable
-    $source = $settings['source'] ?? 'auto';
-    if ($source === 'file') {
-        header('HTTP/1.1 503 Service Unavailable');
-        header('Content-Type: application/json');
-        llLog('Stream rejected: file mode is disabled (live capture only)');
-        return llJson(['success' => false, 'error' => 'File fallback is disabled. Stream is only available via live capture. Set Audio Source to Auto and ensure PipeWire/Pulse or ALSA capture is available.']);
-    }
-
+    // Per latest user request: file-based playback synced to FPP multisync + BackgroundMusic
+    // Try file-sync first (most reliable for staying in sync), live capture as fallback
     $detection = llDetectAudioSources();
     $ffmpeg = $detection['ffmpeg'];
-
     if (!$ffmpeg) {
         header('HTTP/1.1 503 Service Unavailable');
         header('Content-Type: application/json');
         llLog('Stream unavailable: ffmpeg not found');
-        return llJson(['success' => false, 'error' => 'FFmpeg not found. Install ffmpeg (sudo apt install ffmpeg) and ensure live capture is available. No fallback to file.']);
+        return llJson(['success' => false, 'error' => 'FFmpeg not found. Install ffmpeg (sudo apt install ffmpeg).']);
     }
-
+    // File-sync primary: check if we have a media file to stream
+    $preFallback = llGetFallbackMedia();
+    if ($preFallback && (!empty($preFallback['path']) || !empty($preFallback['streamUrl']))) {
+        llLog('Stream: file-sync primary for ' + $preFallback['type'] + ' - ' + $preFallback['media']);
+        return llStreamFileSync(false);
+    }
+    // No file to stream, try live capture as fallback (for OS-level mix when file not found)
     // Probe live capture candidates WITHOUT sending headers yet — find first that yields data
     // Use proc_open to capture stderr for detailed logging when probe fails
     $cmds = llBuildFfmpegCommand($settings, $detection);
