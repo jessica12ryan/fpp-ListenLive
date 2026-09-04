@@ -617,6 +617,14 @@ function llBuildFfmpegCommand($settings, $detection) {
                     $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($f), 'pipewire-pulse:' . $f];
                 }
             }
+            // OS-level capture via pw-record as root — most reliable for FPP's system PipeWire (fpp user gets Permission denied)
+            $pwSudo = trim(@shell_exec('sudo -n true 2>&1 && echo yes')) === 'yes' ? 'sudo ' : '';
+            if (@shell_exec('which pw-record 2>/dev/null')) {
+                foreach (['fpp_group_default','bgmusic_main','bgmusic_crossfade','fpp_alsa_audio','0'] as $tgt) {
+                    $attempts[] = [$pwSudo . $envPrefix . 'pw-record --target ' . escapeshellarg($tgt) . ' - 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:' . $tgt];
+                }
+                $attempts[] = [$pwSudo . $envPrefix . 'pw-record - --rate 48000 --channels 2 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:default'];
+            }
             foreach ($monitors as $src) {
                 $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($src), 'pipewire-pulse:' . $src];
                 if (!empty($detection['ffmpeg_pipewire'])) {
@@ -627,16 +635,6 @@ function llBuildFfmpegCommand($settings, $detection) {
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i default', 'pipewire-pulse:default'];
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 0', 'pulse:0'];
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 1', 'pulse:1'];
-            // OS-level capture: fpp_group_default is the main mix (show + background) — try as root (fpp gets Permission denied)
-            $pwSudo = trim(@shell_exec('sudo -n true 2>&1 && echo yes')) === 'yes' ? 'sudo ' : '';
-            // OS-level capture: fpp_group_default is the main mix (show + background) — try it first
-            if (@shell_exec('which pw-record 2>/dev/null')) {
-                foreach (['fpp_group_default','bgmusic_main','bgmusic_crossfade','fpp_alsa_audio','0'] as $tgt) {
-                    $attempts[] = [$pwSudo . $envPrefix . 'pw-record --target ' . escapeshellarg($tgt) . ' - 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:' . $tgt];
-                }
-                // Also try without target (default source) which should be the monitor of the default sink
-                $attempts[] = [$pwSudo . $envPrefix . 'pw-record - --rate 48000 --channels 2 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:default'];
-            }
         }
         // Then Pulse
         if (!empty($detection['pulse'])) {
