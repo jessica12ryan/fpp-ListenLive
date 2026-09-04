@@ -126,6 +126,8 @@ var llPlayer = {
     waitingTimer: null,
     trackChangePending: false,
     trackChangeTimeout: null,
+    initialConnect: false,
+    initialConnectTimer: null,
     streamUrl: 'api/plugin/fpp-ListenLive/stream',
     // Append cache buster to force reconnect without browser cache
     buildUrl: function() { return llPlayer.streamUrl + '?t=' + Date.now(); },
@@ -148,6 +150,7 @@ var llPlayer = {
             llPlayer.isPlaying = true;
             llPlayer.reconnectAttempts = 0;
             llPlayer.trackChangePending = false;
+            llPlayer.initialConnect = false;
             clearTimeout(llPlayer.trackChangeTimeout);
             clearTimeout(llPlayer.stalledTimer);
             clearTimeout(llPlayer.waitingTimer);
@@ -159,6 +162,7 @@ var llPlayer = {
             $('#ll_wave').removeClass('paused');
             $('#ll_btn_play').val('❚❚ Pause');
             $('#ll_btn_play').attr('onclick', 'llPlayer.pause();');
+            $('#ll_status_text').html('<span class="text-success">● Streaming live audio</span>');
         });
         llPlayer.audio.addEventListener('pause', function() {
             // Only mark as paused if not ended and not seeking reconnect
@@ -232,10 +236,10 @@ var llPlayer = {
             }
         });
         llPlayer.audio.addEventListener('stalled', function() {
-            if (llPlayer.trackChangePending) return;
+            if (llPlayer.trackChangePending || llPlayer.initialConnect) return;
             clearTimeout(llPlayer.stalledTimer);
             llPlayer.stalledTimer = setTimeout(function(){
-                if (llPlayer.audio.readyState < 2 && llPlayer.isPlaying && !llPlayer.audio.paused && !llPlayer.trackChangePending) {
+                if (llPlayer.audio.readyState < 2 && llPlayer.isPlaying && !llPlayer.audio.paused && !llPlayer.trackChangePending && !llPlayer.initialConnect) {
                     $('#ll_status_text').html('<span class="text-warning">Buffering...</span>');
                     clearTimeout(llPlayer.stalledTimer);
                     llPlayer.stalledTimer = setTimeout(function(){
@@ -245,16 +249,16 @@ var llPlayer = {
                         }
                     }, 4000);
                 }
-            }, 800);
+            }, 1500);
         });
         llPlayer.audio.addEventListener('waiting', function() {
-            if (llPlayer.trackChangePending) return;
+            if (llPlayer.trackChangePending || llPlayer.initialConnect) return;
             clearTimeout(llPlayer.waitingTimer);
             llPlayer.waitingTimer = setTimeout(function(){
-                if (llPlayer.audio.readyState < 3 && llPlayer.isPlaying && !llPlayer.audio.paused && !llPlayer.trackChangePending) {
+                if (llPlayer.audio.readyState < 3 && llPlayer.isPlaying && !llPlayer.audio.paused && !llPlayer.trackChangePending && !llPlayer.initialConnect) {
                     $('#ll_status_text').html('<span class="text-warning">Buffering...</span>');
                 }
-            }, 800);
+            }, 1500);
         });
         llPlayer.audio.addEventListener('canplay', function() {
             clearTimeout(llPlayer.stalledTimer);
@@ -280,9 +284,13 @@ var llPlayer = {
             a.src = llPlayer.buildUrl();
             a.load();
         }
+        llPlayer.initialConnect = true;
+        clearTimeout(llPlayer.initialConnectTimer);
+        llPlayer.initialConnectTimer = setTimeout(function(){ llPlayer.initialConnect = false; }, 5000);
         var p = a.play();
         if (p && p.catch) {
             p.catch(function(e) {
+                llPlayer.initialConnect = false;
                 $('#ll_status_text').html('<span class="text-danger">Playback blocked: ' + e.message + ' — click Play again.</span>');
             });
         }
