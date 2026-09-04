@@ -839,13 +839,22 @@ function llStreamEndpoint() {
             if ($chunk !== '') {
                 echo $chunk;
                 flush();
+                usleep(5000);
             } else {
                 usleep(10000);
             }
             if (connection_aborted()) break;
         }
+        // Check why we exited — log for debugging drops after ~60s
+        $aborted = connection_aborted();
+        $eof = feof($handle);
         pclose($handle);
-        llLog('Stream ended live: ' . $label);
+        llLog('Stream ended live: ' . $label . ' eof=' . ($eof?1:0) . ' aborted=' . ($aborted?1:0) . ' status=' . connection_status());
+        // If we exited due to EOF (ffmpeg died) but client still wants audio, try file sync instead of silent close
+        if ($eof && !$aborted && connection_status() === CONNECTION_NORMAL) {
+            llLog('Stream live EOF but client still connected — trying file sync fallback');
+            return llStreamFileSync(false);
+        }
         exit;
     }
 

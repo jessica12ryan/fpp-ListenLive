@@ -178,6 +178,31 @@ var llPlayer = {
                 $('#ll_btn_play').attr('onclick', 'llPlayer.play();');
             }
         });
+        llPlayer.audio.addEventListener('ended', function() {
+            // File-sync streams end at EOF — auto-advance to next track if still intended to play
+            if (llPlayer.isPlaying) {
+                $('#ll_status_text').html('<span class="text-warning">Track ended — loading next...</span>');
+                llPlayer.trackChangePending = false;
+                clearTimeout(llPlayer.trackChangeTimeout);
+                setTimeout(function(){
+                    if (llPlayer.isPlaying) {
+                        llPlayer.reconnectAttempts = 0;
+                        llPlayer.reconnect();
+                    }
+                }, 700);
+            }
+        });
+        llPlayer.audio.addEventListener('suspend', function() {
+            if (llPlayer.isPlaying && !llPlayer.trackChangePending && !llPlayer.initialConnect) {
+                // Browser suspended download (e.g. tab throttled) — try to resume
+                setTimeout(function(){
+                    if (llPlayer.isPlaying && llPlayer.audio.paused && !llPlayer.audio.ended) {
+                        var p = llPlayer.audio.play();
+                        if (p && p.catch) p.catch(function(){});
+                    }
+                }, 1000);
+            }
+        });
         llPlayer.audio.addEventListener('error', function() {
             var err = llPlayer.audio.error;
             var code = err ? err.code : 0;
@@ -271,6 +296,12 @@ var llPlayer = {
             if (llPlayer.audio.readyState >= 3) {
                 clearTimeout(llPlayer.stalledTimer);
                 clearTimeout(llPlayer.waitingTimer);
+            }
+        });
+        document.addEventListener('visibilitychange', function() {
+            if (!document.hidden && llPlayer.isPlaying && llPlayer.audio.paused && !llPlayer.audio.ended) {
+                var p = llPlayer.audio.play();
+                if (p && p.catch) p.catch(function(){});
             }
         });
         llPlayer.refreshStatus();
