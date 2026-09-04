@@ -622,9 +622,9 @@ function llBuildFfmpegCommand($settings, $detection) {
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i default', 'pipewire-pulse:default'];
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 0', 'pulse:0'];
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 1', 'pulse:1'];
-            // Try pw-record with explicit bgmusic and main sink targets
+            // Try pw-record with explicit bgmusic and main sink targets — bgmusic_main first for background
             if (@shell_exec('which pw-record 2>/dev/null')) {
-                foreach (['0','1','bgmusic_main','alsa_output.platform-bcm2835_audio.stereo-fallback'] as $tgt) {
+                foreach (['bgmusic_main','bgmusic_crossfade','fpp_group_default','0','1'] as $tgt) {
                     $attempts[] = [$sudoPrefix . $envPrefix . 'pw-record --target ' . escapeshellarg($tgt) . ' - 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:' . $tgt];
                 }
             }
@@ -857,12 +857,15 @@ function llStreamEndpoint() {
         $gotData = false;
         $buffer = '';
         $stderr = '';
-        while (microtime(true) - $start < 1.8) {
+        while (microtime(true) - $start < 2.2) {
             $chunk = fread($pipes[1], 8192);
             if ($chunk !== false && $chunk !== '') {
                 $buffer .= $chunk;
-                $gotData = true;
-                break;
+                // Require at least 8k of MP3 data to be considered success (not just ID3 header)
+                if (strlen($buffer) >= 8192) {
+                    $gotData = true;
+                    break;
+                }
             }
             // Collect stderr non-blocking
             $errChunk = fread($pipes[2], 4096);
