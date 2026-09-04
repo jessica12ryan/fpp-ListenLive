@@ -895,14 +895,8 @@ function llStreamEndpoint() {
             proc_close($proc);
             continue;
         }
-        // Check for silence — if buffer is silence, try next candidate which may have actual background audio
-        if (llIsSilenceBuffer($buffer)) {
-            llLog('Stream probe got data but silence for ' . $label . ' — trying next candidate for actual audio');
-            fclose($pipes[1]);
-            fclose($pipes[2]);
-            proc_close($proc);
-            continue;
-        }
+        // Note: Don't check for silence here — even silence MP3 is valid data indicating the device is working
+        // The actual background music will be audible when present; silence just means no audio currently, but device is still correct
         // Success — keep stdout pipe open, close stderr, and keep proc for streaming
         // For streaming we need to keep the proc open; store pipes and proc
         fclose($pipes[2]);
