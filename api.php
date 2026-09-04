@@ -573,22 +573,26 @@ function llBuildFfmpegCommand($settings, $detection) {
     $sudoPrefix = $canSudoFpp ? 'sudo -u fpp ' : '';
 
     if ($source === 'auto' || $source === 'pulse' || $source === 'pipewire') {
-        // PipeWire first (native or via pulse compat)
+        // PipeWire first (native or via pulse compat) — try monitor and also direct pipewire
         if (!empty($detection['pipewire'])) {
-            // Prefer explicit monitor sources from detection (pipewire_sources includes .monitor)
             foreach ($detection['pipewire_sources'] as $src) {
                 if (strpos($src, '.monitor') !== false) {
                     $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($src), 'pipewire-pulse:' . $src];
-                    break; // just the first monitor is usually the right sink
+                    // Also try native pipewire for same source
+                    if (!empty($detection['ffmpeg_pipewire'])) {
+                        $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pipewire -i ' . escapeshellarg($src), 'pipewire:' . $src];
+                    }
+                    break;
                 }
             }
-            // If no monitor found, try generic pipewire pulse
+            // Generic pulse default (pipewire-pulse)
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i default', 'pipewire-pulse:default'];
-            // Try native pipewire demuxer if ffmpeg supports it
-            if (!empty($detection['ffmpeg_pipewire']) && !empty($detection['pipewire_sources'])) {
-                foreach (array_slice($detection['pipewire_sources'], 0, 1) as $src) {
-                    $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pipewire -i ' . escapeshellarg($src), 'pipewire:' . $src];
-                }
+            // Try pulse by index (sometimes default fails but index 0 works)
+            $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 0', 'pulse:0'];
+            $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 1', 'pulse:1'];
+            // Try pw-record piped to ffmpeg as fallback for PipeWire
+            if (@shell_exec('which pw-record 2>/dev/null')) {
+                $attempts[] = [$sudoPrefix . $envPrefix . 'pw-record --target 0 - 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:0'];
             }
         }
         // Then Pulse
@@ -603,11 +607,17 @@ function llBuildFfmpegCommand($settings, $detection) {
                     $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($monitor), 'pulse:' . $monitor];
                 }
                 $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i default', 'pulse:default'];
+                $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 0', 'pulse:0'];
             } else {
                 $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($ps), 'pulse:' . $ps];
             }
         } elseif ($source === 'auto') {
             $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i default', 'pulse:default'];
+            $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i 0', 'pulse:0'];
+        }
+        // Also try parecord as fallback
+        if (@shell_exec('which parecord 2>/dev/null')) {
+            $attempts[] = [$sudoPrefix . $envPrefix . 'parecord --monitor-stream 0 --file-format=wav - 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -i -', 'parecord:0'];
         }
     }
     if ($source === 'alsa' || $source === 'auto') {
@@ -616,11 +626,24 @@ function llBuildFfmpegCommand($settings, $detection) {
         if ($alsaDev !== 'default') {
             $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i default', 'alsa:default'];
         }
-        if ($alsaDev !== 'hw:0,0') {
-            $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i hw:0,0', 'alsa:hw:0,0'];
+        // Try common ALSA devices for USB and onboard
+        foreach (['hw:0,0','plughw:0,0','hw:1,0','plughw:1,0','hw:0,1','plughw:0,1','sysdefault','front'] as $dev) {
+            if ($dev !== $alsaDev) {
+                $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i ' . escapeshellarg($dev), 'alsa:' . $dev];
+            }
         }
-        // Also try plughw and Loopback for snd-aloop capture
+        // Also try Loopback for snd-aloop capture
         $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i hw:Loopback,1,0', 'alsa:Loopback'];
+        $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i hw:Loopback,0,0', 'alsa:Loopback0'];
+        // Try to get FPP's configured audio output device
+        $fppAudio = trim(@shell_exec('cat /home/fpp/media/config/FPPAudio 2>/dev/null || cat /home/fpp/media/settings 2>/dev/null | grep AudioOutput | cut -d= -f2') ?? '');
+        if ($fppAudio && $fppAudio !== $alsaDev && $fppAudio !== 'default') {
+            $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i ' . escapeshellarg($fppAudio), 'alsa:fpp:' . $fppAudio];
+        }
+        // Try arecord pipe as last resort
+        if (@shell_exec('which arecord 2>/dev/null')) {
+            $attempts[] = [$sudoPrefix . 'arecord -D plughw:0,0 -f cd -t raw 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 44100 -ac 2 -i -', 'arecord:plughw0'];
+        }
     }
     // NOTE: Do NOT add silence fallback here — file sync is preferred over silence.
     // Silence would show as "playing" but be inaudible, confusing users.

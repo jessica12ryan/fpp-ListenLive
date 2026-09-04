@@ -220,26 +220,15 @@ var llPlayer = {
                 dataType: 'json',
                 success: function(d) {
                     var hint = '';
-                    var isTrackChange = llPlayer.lastMedia && d.fallback_media && d.fallback_media.media && llPlayer.lastMedia.indexOf(d.fallback_media.media) === -1;
-                    if (isTrackChange) {
-                        hint = ' — track changed, waiting for new file';
-                        // Wait a bit longer for new track to be ready
-                        if (llPlayer.isPlaying && llPlayer.reconnectAttempts < 5) {
-                            setTimeout(function(){ llPlayer.reconnect(); }, 1800);
-                            return;
-                        }
-                    }
-                    if (d.fallback_media && !d.fallback_media.path && !d.fallback_media.streamUrl) {
-                        hint = ' — no media found (' + escHtml(d.fallback_media.type + ': ' + d.fallback_media.media) + ')';
-                        if (d.fallback_media.type === 'background' || d.fallback_media.type === 'fpp') {
-                            hint += ' — is playlist still playing? Check FPP Status/Control';
-                        }
-                    } else if (!d.detection || !d.detection.ffmpeg) {
+                    // Live capture only — no file fallback per user request
+                    if (!d.detection || !d.detection.ffmpeg) {
                         hint = ' — ffmpeg missing';
                     } else if (!d.detection.pipewire && !d.detection.pulse && !d.detection.alsa) {
-                        hint = ' — no capture devices, trying file sync';
-                    } else if (d.fallback_media && d.fallback_media.path) {
-                        hint = ' — retrying file sync for ' + escHtml(d.fallback_media.media);
+                        hint = ' — no capture devices detected. Check Diagnostics and FPP Audio settings (PipeWire/Pulse).';
+                    } else if (d.detection && !d.detection.liveAvailable) {
+                        hint = ' — live capture not available. Ensure FPP audio is playing and PipeWire/Pulse monitor is accessible.';
+                    } else {
+                        hint = ' — live capture failed, check logs for ffmpeg stderr';
                     }
                     $('#ll_status_text').html('<span class="text-danger">' + escHtml(msg) + hint + '</span> <span class="text-secondary" style="font-size:12px;">Check Diagnostics & Logs tabs. Will retry...</span>');
                 },
@@ -405,7 +394,7 @@ var llPlayer = {
                 var np = d.now_playing || {};
                 var settings = d.settings || {};
                 var fppdReachable = !!d.fpp_status;
-                var isBackgroundPlaying = !!(d.fallback_media && (d.fallback_media.type === 'background' || d.fallback_media.type === 'afterhours'));
+                var isBackgroundPlaying = !!(d.background_status && d.background_status.backgroundMusicRunning) || !!(d.afterhours_status && d.afterhours_status.status);
 
                 // Badge based on FPP status + background/after-hours
                 var statusName = (s.status_name || s.status || '').toString().toLowerCase();
@@ -430,29 +419,19 @@ var llPlayer = {
                     if (media.playlist || media.count !== "0") media = JSON.stringify(media);
                     else media = '';
                 }
-                // For UI badge/display, consider background active, but don't use fallback for streaming
-                if (d.background_status && d.background_status.backgroundMusicRunning) isBackgroundPlaying = true;
-                if (d.afterhours_status && d.afterhours_status.status === true) isBackgroundPlaying = true;
-                // Fallback to background/after-hours media for DISPLAY only when FPP idle (stream remains live capture)
-                if ((!media || media === 'false' || media === '') && d.fallback_media && d.fallback_media.media) {
-                    // Only for display, not for streaming logic
-                    var dispMedia = d.fallback_media.media + ' (' + d.fallback_media.type + ')';
-                    // Show in nowplaying if FPP idle
-                    if (!s.current_song && !s.current_sequence && !playlistStr) {
-                        media = dispMedia;
-                        if (d.fallback_media.type === 'background') isBackgroundPlaying = true;
-                        if (d.fallback_media.type === 'afterhours') isBackgroundPlaying = true;
-                    }
-                }
+                // Background/after-hours for UI badge only (stream is live capture, not file)
+                // isBackgroundPlaying already set from background_status/afterhours_status above
                 if (!media || media === 'false' || media === '') {
                     $('#ll_nowplaying').html('<span class="text-secondary">Nothing playing — FPP is idle</span>');
                     $('#ll_elapsed').text('—');
                 } else {
                     var elapsed = s.seconds_elapsed || s.time_elapsed || np.seconds_elapsed || 0;
                     var remaining = s.seconds_remaining || s.time_remaining || '';
-                    // For background/after-hours, use fallback elapsed (trackElapsed) for sync-accurate display
+                    // For background/after-hours, use direct background status for display (live capture should include it)
                     if (isBackgroundPlaying) {
-                        if (d.fallback_media && typeof d.fallback_media.elapsed === 'number' && d.fallback_media.elapsed > 0) {
+                        if (d.background_status && typeof d.background_status.trackElapsed === 'number' && d.background_status.trackElapsed > 0) {
+                            elapsed = d.background_status.trackElapsed;
+                        } else if (d.fallback_media && typeof d.fallback_media.elapsed === 'number' && d.fallback_media.elapsed > 0) {
                             elapsed = d.fallback_media.elapsed;
                         } else if (d.background_status && typeof d.background_status.trackElapsed === 'number') {
                             elapsed = d.background_status.trackElapsed;
@@ -464,8 +443,9 @@ var llPlayer = {
                     }
                     $('#ll_nowplaying').text(media);
                     $('#ll_elapsed').text((elapsed || '0') + (remaining ? ' / ' + remaining : ''));
-                    if (isBackgroundPlaying && !s.current_song) {
-                        $('#ll_nowplaying').html(escHtml(media) + ' <span class="ll-badge" style="background:#198754;color:#fff;font-size:11px;">via ' + escHtml(d.fallback_media.type) + ' • sync</span>');
+                    if (isBackgroundPlaying && !s.current_song && d.background_status) {
+                        var bgType = d.background_status ? 'background' : 'afterhours';
+                        $('#ll_nowplaying').html(escHtml(media) + ' <span class="ll-badge" style="background:#198754;color:#fff;font-size:11px;">via ' + escHtml(bgType) + '</span>');
                     }
                 }
                 // Also show background status in playlist/sequence when idle
@@ -483,10 +463,10 @@ var llPlayer = {
                 $('#ll_src').text(settings.source || 'auto');
                 $('#ll_bitrate').text(settings.bitrate || '128k');
 
-                // Auto-reconnect when track changes while in file-sync mode
-                // Live PipeWire/Pulse capture is gapless and mixes background correctly — no reconnect needed there
-                var currentMediaKey = (media || '') + '|' + (s.current_playlist || '') + '|' + (d.fallback_media ? d.fallback_media.type : '') + '|' + (d.fallback_media ? d.fallback_media.media : '');
-                var isFileSync = !settings.enabled ? false : (settings.source === 'file' || !det.liveAvailable);
+                // Live capture is gapless — no reconnect needed for track changes when liveAvailable
+                // File-sync is disabled per user request, so never auto-reconnect for track change
+                var currentMediaKey = (media || '') + '|' + (s.current_playlist || '') + '|' + (isBackgroundPlaying ? 'background' : 'fpp') + '|' + (media || '');
+                var isFileSync = false; // file sync disabled — live capture only
                 if (llPlayer.isPlaying && llPlayer.lastMedia && llPlayer.lastMedia !== currentMediaKey && isFileSync) {
                     $('#ll_status_text').html('<span class="text-warning">Track changed — re-syncing...</span>');
                     // Reset drift tracking for new track
@@ -506,7 +486,7 @@ var llPlayer = {
                             type: 'GET',
                             dataType: 'json',
                             success: function(nd) {
-                                var nm = (nd.fpp_status && (nd.fpp_status.current_song || nd.fpp_status.current_sequence)) || (nd.fallback_media && nd.fallback_media.media) || '';
+                                var nm = (nd.fpp_status && (nd.fpp_status.current_song || nd.fpp_status.current_sequence)) || (nd.background_status && nd.background_status.currentTrack) || '';
                                 if (nm && media && nm !== media.split(' (')[0]) {
                                     // Status still shows old track, wait a bit more
                                     setTimeout(function(){ if (llPlayer.isPlaying) llPlayer.reconnect(); }, 800);
@@ -521,12 +501,12 @@ var llPlayer = {
                     llPlayer.lastMedia = currentMediaKey;
                 }
 
-                // Drift correction for file-sync (keeps background/FPP file sync in sync with show)
-                if (llPlayer.isPlaying && isFileSync && !llPlayer.trackChangePending && llPlayer.audio && !llPlayer.audio.paused && llPlayer.audio.readyState >= 2) {
+                // Drift correction disabled — live capture is gapless, no file-sync drift
+                if (false && llPlayer.isPlaying && isFileSync && !llPlayer.trackChangePending && llPlayer.audio && !llPlayer.audio.paused && llPlayer.audio.readyState >= 2) {
                     var currentFallbackElapsed = 0;
-                    if (d.fallback_media && typeof d.fallback_media.elapsed === 'number') currentFallbackElapsed = d.fallback_media.elapsed;
+                    if (d.background_status && typeof d.background_status.trackElapsed === 'number') currentFallbackElapsed = d.background_status.trackElapsed;
                     else if (typeof s.seconds_elapsed === 'number') currentFallbackElapsed = s.seconds_elapsed;
-                    else if (d.background_status && typeof d.background_status.trackElapsed === 'number') currentFallbackElapsed = d.background_status.trackElapsed;
+                    else if (d.fallback_media && typeof d.fallback_media.elapsed === 'number') currentFallbackElapsed = d.fallback_media.elapsed;
                     if (llPlayer.streamStartElapsed === null && currentFallbackElapsed > 0) {
                         llPlayer.streamStartElapsed = currentFallbackElapsed;
                         llPlayer.streamStartTime = Date.now();
@@ -607,9 +587,10 @@ var llPlayer = {
                 html += '<tr><td style="padding:4px;"><b>PipeWire:</b></td><td style="padding:4px;">' + (det.pipewire ? '<span class="text-success">Available</span>' : '<span class="text-secondary">Not detected</span>') + (det.pipewire_sources && det.pipewire_sources.length ? ' <span class="text-secondary">(' + escHtml(det.pipewire_sources.slice(0,2).join(', ')) + ')</span>' : '') + '</td></tr>';
                 html += '<tr><td style="padding:4px;"><b>PulseAudio:</b></td><td style="padding:4px;">' + (det.pulse ? '<span class="text-success">Available</span> <span class="text-secondary">(pipewire-pulse compat)</span>' : '<span class="text-secondary">Not detected</span>') + (det.pulse_sources && det.pulse_sources.length ? ' <span class="text-secondary">(' + escHtml(det.pulse_sources.slice(0,2).join(', ')) + ')</span>' : '') + '</td></tr>';
                 html += '<tr><td style="padding:4px;"><b>ALSA:</b></td><td style="padding:4px;">' + (det.alsa ? '<span class="text-success">Available</span>' : '<span class="text-secondary">Not detected</span>') + (det.alsa_devices && det.alsa_devices.length ? ' <span class="text-secondary">(' + escHtml(det.alsa_devices.slice(0,2).join(', ')) + ')</span>' : '') + '</td></tr>';
+                // Fallback media is display-only, not used for streaming (live capture only)
                 if (d.fallback_media) {
                     var fm = d.fallback_media;
-                    html += '<tr><td style="padding:4px;"><b>Fallback media:</b></td><td style="padding:4px;">' + escHtml(fm.type + ': ' + fm.media) + (fm.path ? ' <span class="text-success">(' + escHtml(fm.path) + ')</span>' : ' <span class="text-danger">(not found)</span>') + '</td></tr>';
+                    html += '<tr><td style="padding:4px;"><b>Detected media (display only):</b></td><td style="padding:4px;">' + escHtml(fm.type + ': ' + fm.media) + (fm.path ? ' <span class="text-secondary">(' + escHtml(fm.path) + ')</span>' : ' <span class="text-secondary">(file not found — live capture only)</span>') + '</td></tr>';
                 }
                 if (d.background_status) html += '<tr><td style="padding:4px;"><b>BackgroundMusic:</b></td><td style="padding:4px;"><span class="text-success">Plugin responding</span></td></tr>';
                 if (d.afterhours_status) html += '<tr><td style="padding:4px;"><b>AfterHours:</b></td><td style="padding:4px;"><span class="text-success">Plugin responding</span></td></tr>';
