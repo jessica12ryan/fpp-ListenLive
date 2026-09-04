@@ -208,13 +208,14 @@ function llDetectAudioSources() {
 }
 
 function llGetFppStatus() {
-    // Try multiple methods to reach FPPD — FPP's Apache on :80 proxies /api/fppd/status,
-    // but some installs need curl or direct 127.0.0.1 handling.
+    // Use fppd's direct HTTP (port 32322, no /api prefix) to avoid Apache deadlock
+    // When this plugin's status is requested via Apache, a nested curl to localhost:80/api/fppd/status
+    // would deadlock if Apache has no free workers. Direct to fppd avoids that.
     $urls = [
-        'http://localhost/api/fppd/status',
+        'http://127.0.0.1:32322/fppd/status',
+        'http://localhost:32322/fppd/status',
         'http://127.0.0.1/api/fppd/status',
-        'http://localhost:32322/api/fppd/status',
-        'http://127.0.0.1:32322/api/fppd/status',
+        'http://localhost/api/fppd/status',
     ];
 
     // Prefer curl if available — more reliable than allow_url_fopen
