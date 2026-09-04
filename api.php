@@ -290,6 +290,36 @@ function llGetMultisyncElapsed() {
 }
 
 function llGetBackgroundMusicStatus() {
+    // Try direct file first (fastest, no HTTP deadlock) — status file is updated every second by GStreamer loop
+    $statusFile = '/tmp/bg_music_status.txt';
+    if (file_exists($statusFile) && is_readable($statusFile)) {
+        $lines = @file($statusFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if ($lines) {
+            $data = [];
+            foreach ($lines as $line) {
+                $pos = strpos($line, '=');
+                if ($pos !== false) {
+                    $k = substr($line, 0, $pos);
+                    $v = substr($line, $pos + 1);
+                    $data[$k] = $v;
+                }
+            }
+            if (!empty($data['filename'])) {
+                $data['currentTrack'] = $data['filename'];
+                $data['trackElapsed'] = isset($data['elapsed']) ? (int)$data['elapsed'] : 0;
+                $data['trackDuration'] = isset($data['duration']) ? (int)$data['duration'] : 0;
+                $data['backgroundMusicRunning'] = true;
+                $data['_source'] = 'direct_file';
+                // Try to also get full API data for other fields, but return quickly if file is good
+                // Do a quick non-blocking HTTP check with 1s timeout, but don't hang
+                $urls = [
+                    'http://127.0.0.1:32322/fppd/status',
+                ];
+                // For now, return direct file data immediately to avoid HTTP deadlock
+                return $data;
+            }
+        }
+    }
     $urls = [
         'http://localhost/api/plugin/fpp-plugin-BackgroundMusic/status',
         'http://127.0.0.1/api/plugin/fpp-plugin-BackgroundMusic/status',
@@ -301,14 +331,15 @@ function llGetBackgroundMusicStatus() {
         if (function_exists('curl_init')) {
             $ch = curl_init($url);
             curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_TIMEOUT, 2);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 1);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 1);
             $tmp = @curl_exec($ch);
             $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
             if ($tmp !== false && $code === 200 && $tmp !== '' && $tmp[0] === '{') {
                 $json = $tmp;
             }
         } else {
-            $ctx = stream_context_create(['http' => ['timeout' => 2]]);
+            $ctx = stream_context_create(['http' => ['timeout' => 1]]);
             $tmp = @file_get_contents($url, false, $ctx);
             if ($tmp !== false && $tmp !== '' && $tmp[0] === '{') $json = $tmp;
         }
