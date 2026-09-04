@@ -829,13 +829,17 @@ function llStreamEndpoint() {
         llLog('Stream unavailable: ffmpeg not found');
         return llJson(['success' => false, 'error' => 'FFmpeg not found. Install ffmpeg (sudo apt install ffmpeg).']);
     }
-    // File-sync primary: check if we have a media file to stream
+    // Strictly file sync per user request — no OS-level fallback
     $preFallback = llGetFallbackMedia();
     if ($preFallback && (!empty($preFallback['path']) || !empty($preFallback['streamUrl']))) {
-        llLog('Stream: file-sync primary for ' + $preFallback['type'] + ' - ' + $preFallback['media']);
+        llLog('Stream: file-sync for ' + $preFallback['type'] + ' - ' + $preFallback['media']);
         return llStreamFileSync(false);
     }
-    // No file to stream, try live capture as fallback (for OS-level mix when file not found)
+    header('HTTP/1.1 503 Service Unavailable');
+    header('Content-Type: application/json');
+    llLog('Stream unavailable: no file to sync (strict file-sync, no live fallback)');
+    return llJson(['success' => false, 'error' => 'Stream unavailable — no media file currently playing. Start a playlist or background music. File sync is strictly used per user request.']);
+    // Live capture fallback disabled per user request — code below is unreachable but kept for reference
     // Probe live capture candidates WITHOUT sending headers yet — find first that yields data
     // Use proc_open to capture stderr for detailed logging when probe fails
     $cmds = llBuildFfmpegCommand($settings, $detection);
