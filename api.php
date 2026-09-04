@@ -569,35 +569,49 @@ function llBuildFfmpegCommand($settings, $detection) {
      // Helper to wrap ffmpeg with environment for pipewire/pulse socket access
     // FPP runs as user 'fpp', apache/php-fpm also as 'fpp', but ensure XDG_RUNTIME_DIR and PIPEWIRE_REMOTE
     $envPrefix = '';
-    $xdg = trim(@shell_exec('echo $XDG_RUNTIME_DIR 2>/dev/null') ?? '');
-    if ($xdg === '') {
-        if (is_dir('/run/user/1000')) $envPrefix = 'XDG_RUNTIME_DIR=/run/user/1000 ';
-        elseif (is_dir('/run/user/512')) $envPrefix = 'XDG_RUNTIME_DIR=/run/user/512 ';
-        elseif (is_dir('/run/user/0')) $envPrefix = 'XDG_RUNTIME_DIR=/run/user/0 ';
-    }
-    // FPP's PipeWire uses a dedicated socket for background music mixing
+    // FPP 10 uses system-wide PipeWire at /run/pipewire-fpp — use it explicitly
+    // Do NOT use /run/user/* which is per-user and wrong for FPP's system service
     if (is_dir('/run/pipewire-fpp') || file_exists('/run/pipewire-fpp/pipewire-0')) {
-        $envPrefix .= 'PIPEWIRE_REMOTE=/run/pipewire-fpp/pipewire-0 ';
-    } elseif (file_exists('/run/user/1000/pipewire-0')) {
-        $envPrefix .= 'PIPEWIRE_REMOTE=/run/user/1000/pipewire-0 ';
+        $envPrefix = 'PIPEWIRE_REMOTE=/run/pipewire-fpp/pipewire-0 PIPEWIRE_RUNTIME_DIR=/run/pipewire-fpp XDG_RUNTIME_DIR=/run/pipewire-fpp ';
+    } else {
+        $xdg = trim(@shell_exec('echo $XDG_RUNTIME_DIR 2>/dev/null') ?? '');
+        if ($xdg === '') {
+            if (is_dir('/run/user/1000')) $envPrefix = 'XDG_RUNTIME_DIR=/run/user/1000 ';
+            elseif (is_dir('/run/user/512')) $envPrefix = 'XDG_RUNTIME_DIR=/run/user/512 ';
+        }
+        if (file_exists('/run/user/1000/pipewire-0')) {
+            $envPrefix .= 'PIPEWIRE_REMOTE=/run/user/1000/pipewire-0 ';
+        }
     }
     // If we can sudo to fpp, that ensures correct pulse/pipewire perms (harmless if already fpp)
     $canSudoFpp = trim(@shell_exec('sudo -n -u fpp true 2>&1 && echo yes') ?? '') === 'yes';
     $sudoPrefix = $canSudoFpp ? 'sudo -u fpp ' : '';
 
     if ($source === 'auto' || $source === 'pulse' || $source === 'pipewire') {
-        // PipeWire first — try ALL monitors, not just first, and check for bgmusic/main sinks
+        // PipeWire first — prioritize the actual FPP mix (fpp_group_default.monitor) which carries show + background
         if (!empty($detection['pipewire'])) {
             $monitors = array_filter($detection['pipewire_sources'], fn($s) => strpos($s, '.monitor') !== false);
-            // Prioritize main sink monitor and bgmusic monitor
             usort($monitors, function($a,$b) {
                 $score = function($s) {
-                    if (strpos($s, 'bgmusic') !== false) return 0; // bgmusic monitor has background
-                    if (strpos($s, 'alsa_output') !== false) return 1; // main sink
-                    return 2;
+                    if (strpos($s, 'fpp_group_default.monitor') !== false) return 0;
+                    if (strpos($s, 'fpp_') !== false && strpos($s, '.monitor') !== false) return 1;
+                    if (strpos($s, 'bgmusic') !== false) return 0;
+                    if (strpos($s, 'alsa_output') !== false) return 2;
+                    return 3;
                 };
                 return $score($a) - $score($b);
             });
+            // Force fpp_group_default.monitor first if we know it exists (seen on this host)
+            $forced = ['fpp_group_default.monitor','fpp_alsa_audio.monitor','fpp_fx_g1_audio.monitor'];
+            foreach ($forced as $f) {
+                if (in_array($f, $monitors)) {
+                    // Move to front
+                    $monitors = array_merge([$f], array_diff($monitors, [$f]));
+                } else {
+                    // Try it anyway even if not in detection (may be present but not listed via API)
+                    $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($f), 'pipewire-pulse:' . $f];
+                }
+            }
             foreach ($monitors as $src) {
                 $attempts[] = [$sudoPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($src), 'pipewire-pulse:' . $src];
                 if (!empty($detection['ffmpeg_pipewire'])) {
