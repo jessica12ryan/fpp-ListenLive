@@ -125,6 +125,7 @@ var llPlayer = {
     stalledTimer: null,
     waitingTimer: null,
     trackChangePending: false,
+    trackChangeTimeout: null,
     streamUrl: 'api/plugin/fpp-ListenLive/stream',
     // Append cache buster to force reconnect without browser cache
     buildUrl: function() { return llPlayer.streamUrl + '?t=' + Date.now(); },
@@ -147,6 +148,7 @@ var llPlayer = {
             llPlayer.isPlaying = true;
             llPlayer.reconnectAttempts = 0;
             llPlayer.trackChangePending = false;
+            clearTimeout(llPlayer.trackChangeTimeout);
             clearTimeout(llPlayer.stalledTimer);
             clearTimeout(llPlayer.waitingTimer);
             // Reset sync tracking — will be set on next status poll with current elapsed
@@ -162,6 +164,10 @@ var llPlayer = {
             // Only mark as paused if not ended and not seeking reconnect
             if (!llPlayer.audio.ended) {
                 llPlayer.isPlaying = false;
+                llPlayer.trackChangePending = false;
+                clearTimeout(llPlayer.trackChangeTimeout);
+                clearTimeout(llPlayer.stalledTimer);
+                clearTimeout(llPlayer.waitingTimer);
                 $('#ll_badge').removeClass('ll-badge-live').addClass('ll-badge-idle').text('Paused');
                 $('#ll_wave').addClass('paused');
                 $('#ll_btn_play').val('▶ Play');
@@ -287,6 +293,10 @@ var llPlayer = {
     pause: function() {
         llPlayer.audio.pause();
         llPlayer.isPlaying = false;
+        llPlayer.trackChangePending = false;
+        clearTimeout(llPlayer.trackChangeTimeout);
+        clearTimeout(llPlayer.stalledTimer);
+        clearTimeout(llPlayer.waitingTimer);
     },
 
     stop: function() {
@@ -294,6 +304,10 @@ var llPlayer = {
         llPlayer.audio.removeAttribute('src');
         llPlayer.audio.load();
         llPlayer.isPlaying = false;
+        llPlayer.trackChangePending = false;
+        clearTimeout(llPlayer.trackChangeTimeout);
+        clearTimeout(llPlayer.stalledTimer);
+        clearTimeout(llPlayer.waitingTimer);
         $('#ll_badge').removeClass('ll-badge-live ll-badge-warn').addClass('ll-badge-idle').text('Stopped');
         $('#ll_wave').addClass('paused');
         $('#ll_status_text').html('<span class="text-secondary">Stopped</span>');
@@ -437,6 +451,8 @@ var llPlayer = {
                     llPlayer.lastMedia = currentMediaKey;
                     clearTimeout(llPlayer.stalledTimer);
                     clearTimeout(llPlayer.waitingTimer);
+                    clearTimeout(llPlayer.trackChangeTimeout);
+                    llPlayer.trackChangeTimeout = setTimeout(function(){ llPlayer.trackChangePending = false; }, 8000);
                     setTimeout(function(){
                         // Double-check new track still current before reconnect (avoid flapping if status hasn't settled)
                         $.ajax({

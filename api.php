@@ -444,8 +444,32 @@ function llGetFallbackMedia() {
                 return ['path' => $path, 'type' => 'background', 'media' => $media, 'elapsed' => $bgElapsed, 'bgStatus' => $bg];
             }
         }
+        // Try reading playlist file directly for background (more reliable than mediaName)
+        if ($isPlaying && !empty($candidates)) {
+            $playlistFile = '/tmp/background_music_playlist.m3u';
+            if (file_exists($playlistFile)) {
+                $lines = @file($playlistFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+                if ($lines) {
+                    foreach ($lines as $line) {
+                        $line = trim($line);
+                        if ($line === '' || $line[0] === '#') continue;
+                        if (basename($line) === basename($candidates[0]) && file_exists($line)) {
+                            return ['path' => $line, 'type' => 'background', 'media' => basename($line), 'elapsed' => $bgElapsed, 'bgStatus' => $bg];
+                        }
+                    }
+                }
+            }
+        }
         // If bg says playing but we couldn't find file, return bg status for diagnostics
         if ($isPlaying || !empty($candidates)) {
+            // Small retry for just-changed track (file may not be indexed yet)
+            usleep(300000);
+            foreach ($candidates as $media) {
+                $path = llGetMediaPath($media);
+                if ($path && file_exists($path)) {
+                    return ['path' => $path, 'type' => 'background', 'media' => $media, 'elapsed' => $bgElapsed, 'bgStatus' => $bg];
+                }
+            }
             return ['path' => null, 'type' => 'background', 'media' => $candidates[0] ?? 'unknown', 'elapsed' => $bgElapsed, 'bgStatus' => $bg];
         }
         // Also check if bg has playlist details with current index
