@@ -405,25 +405,19 @@ var llExactAudio = {
                 // For exact, new file's first chunk should be from master, not 0, so seek stays master/5*5 (already)
                 // Keep nextStart for gapless, don't reset to now+0.15 (that would cut old file's tail)
             }
-            var seek = Math.floor(Math.max(0, master) / 5) * 5;
+            // Exact <250ms: seek to master, not 5s aligned, for frame
+            var seek = Math.max(0, master);
+            // For gapless, still fetch 5s chunk from seek
+            var mediaKey = d.media + '|' + Math.floor(seek);
+            var queuedNow = self.nextStart - self.ctx.currentTime;
+            if (self.lastMedia === mediaKey && !isNewSong && queuedNow > 1.0) {
+                self.fetching = false;
+                return setTimeout(function(){ self.schedule(); }, 120);
+            }
             if (isNewSong) {
                 self.lastMedia = null;
-            }
-            var mediaKey = d.media + '|' + seek;
-            var queuedNow = self.nextStart - self.ctx.currentTime;
-            if (self.lastMedia === mediaKey && !isNewSong && queuedNow > 1.5) {
-                self.fetching = false;
-                return setTimeout(function(){ self.schedule(); }, 150);
-            }
-            // If queued <1.0s, force fetch next chunk even if same seek (overlap for safety)
-            if (queuedNow < 1.0 && !isNewSong && self.lastMedia === mediaKey) {
-                // Advance to next 5s chunk
-                seek += 5;
-                mediaKey = d.media + '|' + seek;
-                if (self.lastMedia === mediaKey) {
-                    self.fetching = false;
-                    return setTimeout(function(){ self.schedule(); }, 150);
-                }
+                // New song: force fresh fetch
+                mediaKey = d.media + '|' + Math.floor(seek);
             }
             self.lastMedia = mediaKey;
             // Fetch 5s chunk for low buffering (was whole file)
@@ -444,16 +438,26 @@ var llExactAudio = {
                 var src = self.ctx.createBufferSource();
                 src.buffer = decoded;
                 src.connect(self.ctx.destination);
-                var when = Math.max(self.nextStart, self.ctx.currentTime + 0.05);
-                // If new song and when is far in future (>5s), pull it in to avoid 6s gap
-                if (isNewSong && when - self.ctx.currentTime > 3.0) {
-                    when = self.ctx.currentTime + 0.1;
-                    self.nextStart = when;
+                // Exact <250ms: schedule at master time, not nextStart gapless
+                var when = self.ctx.currentTime + 0.08 + (master - seek);
+                // But keep gapless: if nextStart is ahead, start there for gapless, else exact
+                if (!isNewSong) {
+                    when = Math.max(self.nextStart, when);
+                } else {
+                    // New song: start gapless at nextStart if we have queued old, else now
+                    when = Math.max(self.nextStart, self.ctx.currentTime + 0.08);
+                    if (when - self.ctx.currentTime > 2.0) when = self.ctx.currentTime + 0.12;
+                }
+                // Clamp drift <250ms: if when is >0.25 ahead of master, pull in
+                var drift = when - self.ctx.currentTime - (master - seek);
+                if (Math.abs(drift) > 0.25) {
+                    when = self.ctx.currentTime + 0.08 + (master - seek);
+                    console.log('AudioContext drift',drift.toFixed(3),'→ when',when.toFixed(2));
                 }
                 src.start(when);
                 self.nextStart = when + decoded.duration;
                 self.fetching = false;
-                $('#ll_exact_status').text('exact • AudioContext • '+d.media.split('/').pop().substring(0,20)+' • '+(master).toFixed(1)+'s • next '+self.nextStart.toFixed(1));
+                $('#ll_exact_status').text('exact • AudioContext • '+d.media.split('/').pop().substring(0,20)+' • '+(master).toFixed(1)+'s • drift '+(drift||0).toFixed(2)+'s');
                 setTimeout(function(){ self.schedule(); }, 80);
             }).catch(function(e){
                 console.warn('AudioContext decode/fetch failed', d.media, e);
