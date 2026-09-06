@@ -376,17 +376,24 @@ var llExactAudio = {
     schedule: function() {
         if (!this.useAudio || !llPlayer.isPlaying || !this.ctx) return;
         var self = this;
-        if (self.nextStart - self.ctx.currentTime > 3.0) {
-            return setTimeout(function(){ self.schedule(); }, 200);
+        // Watchdog: if ctx was suspended (background tab), resume
+        if (self.ctx.state === 'suspended') { try { self.ctx.resume(); } catch(e) {} }
+        // Keep 2-4s queued, not 3s — ensures gapless even with decode delay
+        var queued = self.nextStart - self.ctx.currentTime;
+        if (queued > 4.0) {
+            return setTimeout(function(){ self.schedule(); }, 300);
         }
-        if (self.fetching) return setTimeout(function(){ self.schedule(); }, 100);
+        // If queued <0.2s and no fetch in progress, we are about to underrun — warn
+        if (queued < 0.3 && !self.fetching) {
+            console.warn('AudioContext low buffer', queued.toFixed(2));
+            $('#ll_exact_status').text('exact • low buffer '+queued.toFixed(2)+'s');
+        }
+        if (self.fetching) return setTimeout(function(){ self.schedule(); }, 80);
         self.fetching = true;
         $.getJSON('api/plugin/fpp-ListenLive/sync', function(d){
             if (!d || !d.has_media || !d.media) {
                 self.fetching = false;
-                // Keep already queued audio, just wait for next track — don't stop AudioContext
-                // If we have <0.5s left and no media, we'll hear gap, but don't kill ctx
-                if (self.nextStart - self.ctx.currentTime < 0.5) {
+                if (queued < 1.0) {
                     $('#ll_exact_status').text('exact • idle • waiting for next track');
                 }
                 return setTimeout(function(){ self.schedule(); }, 300);
@@ -412,9 +419,20 @@ var llExactAudio = {
                 self.lastMedia = null;
             }
             var mediaKey = d.media + '|' + seek;
-            if (self.lastMedia === mediaKey && !isNewSong) {
+            var queuedNow = self.nextStart - self.ctx.currentTime;
+            if (self.lastMedia === mediaKey && !isNewSong && queuedNow > 1.5) {
                 self.fetching = false;
                 return setTimeout(function(){ self.schedule(); }, 150);
+            }
+            // If queued <1.0s, force fetch next chunk even if same seek (overlap for safety)
+            if (queuedNow < 1.0 && !isNewSong && self.lastMedia === mediaKey) {
+                // Advance to next 5s chunk
+                seek += 5;
+                mediaKey = d.media + '|' + seek;
+                if (self.lastMedia === mediaKey) {
+                    self.fetching = false;
+                    return setTimeout(function(){ self.schedule(); }, 150);
+                }
             }
             self.lastMedia = mediaKey;
             // Fetch 5s chunk for low buffering (was whole file)
