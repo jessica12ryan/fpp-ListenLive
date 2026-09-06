@@ -216,8 +216,19 @@ function llDetectAudioSources() {
     $result['pulse_sources'] = array_values(array_unique($result['pulse_sources']));
     $result['pipewire_sources'] = array_values(array_unique($result['pipewire_sources']));
     $result['alsa_devices'] = array_values(array_unique($result['alsa_devices']));
-    // Live capture is available if ffmpeg exists and at least one audio backend is present
-    $result['liveAvailable'] = $result['ffmpeg'] && ($result['pipewire'] || $result['pulse'] || $result['alsa']);
+    // PipeWire required for exact (fpp_group_default) — not just any backend
+    $hasFppGroup = false;
+    foreach ($result['pipewire_sources'] as $s) {
+        if (strpos($s, 'fpp_group_default') !== false) $hasFppGroup = true;
+    }
+    if (!$hasFppGroup) {
+        // Also check ffmpeg fallback sources for fpp_group_default (seen on this host)
+        $hasFppGroup = true; // Pi's pipewire may not list via API but still works via fpp_group_default.monitor
+        // We still require pipewire true, but don't fail if fpp_group_default not in list —
+        // the actual capture tries fpp_group_default.monitor first, so liveAvailable true if pipewire
+    }
+    $result['liveAvailable'] = $result['ffmpeg'] && $result['pipewire'] && $hasFppGroup;
+    $result['pipewire_required'] = true;
     return $result;
 }
 
@@ -891,6 +902,20 @@ function llStreamEndpoint() {
         llLog('Stream unavailable: ffmpeg not found');
         return llJson(['success' => false, 'error' => 'FFmpeg not found. Install ffmpeg (sudo apt install ffmpeg).']);
     }
+    if (empty($detection['pipewire']) || empty($detection['liveAvailable'])) {
+        header('HTTP/1.1 503 Service Unavailable');
+        header('Content-Type: application/json');
+        llLog('Stream unavailable: PipeWire required for exact (fpp_group_default) not found');
+        return llJson(['success' => false, 'error' => 'PipeWire required for exact frame sync (fpp_group_default) not found. Ensure FPP 9+ with pipewire and FPP audio via pipewiresink. Check Diagnostics.']);
+    }
+    // MultiSync required for exact — versatile single/multi, master clock
+    $fppStatusTmp = llGetFppStatus();
+    if ($fppStatusTmp !== null && isset($fppStatusTmp['multisync']) && !$fppStatusTmp['multisync']) {
+        header('HTTP/1.1 503 Service Unavailable');
+        header('Content-Type: application/json');
+        llLog('Stream unavailable: MultiSync required for exact frame sync not enabled');
+        return llJson(['success' => false, 'error' => 'MultiSync required for exact frame sync not enabled. Enable MultiSync in FPP Settings → MultiSync (Player/Remote) for versatile exact across single/multi.']);
+    }
     // Strictly file sync per user request — no OS-level fallback
     $preFallback = llGetFallbackMedia();
     if ($preFallback && (!empty($preFallback['path']) || !empty($preFallback['streamUrl']))) {
@@ -1526,6 +1551,18 @@ function llLogsEndpoint() {
 }
 
 function llSyncEndpoint() {
+    $det = llDetectAudioSources();
+    if (empty($det['pipewire']) || empty($det['liveAvailable'])) {
+        header('HTTP/1.1 503 Service Unavailable');
+        header('Content-Type: application/json');
+        return llJson(['success' => false, 'error' => 'PipeWire required for exact frame sync not available (fpp_group_default).']);
+    }
+    $fppTmp = llGetFppStatus();
+    if ($fppTmp !== null && isset($fppTmp['multisync']) && !$fppTmp['multisync']) {
+        header('HTTP/1.1 503 Service Unavailable');
+        header('Content-Type: application/json');
+        return llJson(['success' => false, 'error' => 'MultiSync required for exact frame sync not enabled. Enable MultiSync in FPP Settings.']);
+    }
     // Try C++ plugin's exact sync first (monotonic, frame-exact), then fallback to file/status
     $syncFile = '/tmp/ll_sync.json';
     $nowMono = LLSyncTiming::monotonicMs();
@@ -1593,6 +1630,18 @@ function llSyncEndpoint() {
 }
 
 function llClockEndpoint() {
+    $det = llDetectAudioSources();
+    if (empty($det['pipewire']) || empty($det['liveAvailable'])) {
+        header('HTTP/1.1 503 Service Unavailable');
+        header('Content-Type: application/json');
+        return llJson(['success' => false, 'error' => 'PipeWire required for exact frame sync not available.']);
+    }
+    $fppTmp = llGetFppStatus();
+    if ($fppTmp !== null && isset($fppTmp['multisync']) && !$fppTmp['multisync']) {
+        header('HTTP/1.1 503 Service Unavailable');
+        header('Content-Type: application/json');
+        return llJson(['success' => false, 'error' => 'MultiSync required for exact frame sync not enabled.']);
+    }
     $nowMono = LLSyncTiming::monotonicMs();
     $nowWall = LLSyncTiming::wallClockMs();
     // Try C++ clock first
