@@ -367,7 +367,6 @@ var llExactAudio = {
     schedule: function() {
         if (!this.useAudio || !llPlayer.isPlaying || !this.ctx) return;
         var self = this;
-        // Don't fetch if we have 3s queued
         if (self.nextStart - self.ctx.currentTime > 3.0) {
             return setTimeout(function(){ self.schedule(); }, 200);
         }
@@ -376,17 +375,28 @@ var llExactAudio = {
         $.getJSON('api/plugin/fpp-ListenLive/sync', function(d){
             if (!d || !d.has_media || !d.media) {
                 self.fetching = false;
-                $('#ll_exact_status').text('exact • idle');
-                return setTimeout(function(){ self.schedule(); }, 500);
+                // Keep already queued audio, just wait for next track — don't stop AudioContext
+                // If we have <0.5s left and no media, we'll hear gap, but don't kill ctx
+                if (self.nextStart - self.ctx.currentTime < 0.5) {
+                    $('#ll_exact_status').text('exact • idle • waiting for next track');
+                }
+                return setTimeout(function(){ self.schedule(); }, 300);
             }
             var nowWall = Date.now();
             var serverWall = d.wall_ms || d.server_wall_ms || nowWall;
             var master = (typeof d.extrapolated_seconds === 'number' ? d.extrapolated_seconds : d.seconds) + (nowWall - serverWall)/1000;
-            // For gapless file, fetch next chunk via media endpoint with seek
+            // Detect song change — if media changed, don't wait for nextStart, schedule next chunk immediately after current
+            var isNewSong = self.lastMedia && self.lastMedia.split('|')[0] !== d.media;
+            if (isNewSong) {
+                console.log('AudioContext new song', d.media, 'seek', Math.floor(master));
+                // Keep nextStart as is for gapless (old file ends, new starts), but clear lastMedia so we fetch from 0
+                // Don't reset nextStart to now, keep gapless
+            }
             var seek = Math.floor(Math.max(0, master));
-            // Avoid refetching same seek
+            // For new song, seek should be 0, not master of old file
+            if (isNewSong) seek = 0;
             var mediaKey = d.media + '|' + seek;
-            if (self.lastMedia === mediaKey) {
+            if (self.lastMedia === mediaKey && !isNewSong) {
                 self.fetching = false;
                 return setTimeout(function(){ self.schedule(); }, 150);
             }
@@ -396,27 +406,38 @@ var llExactAudio = {
                 if (!resp.ok) throw new Error('media fetch '+resp.status);
                 return resp.arrayBuffer();
             }).then(function(buf){
-                return self.ctx.decodeAudioData(buf);
+                // Guard against empty or JSON error payload (when media not found)
+                if (buf.byteLength < 1024) {
+                    try {
+                        var txt = new TextDecoder().decode(buf.slice(0,200));
+                        if (txt.trim().startsWith('{') && txt.indexOf('success') !== -1) throw new Error('media not found JSON');
+                    } catch(e) {}
+                }
+                return self.ctx.decodeAudioData(buf.slice(0));
             }).then(function(decoded){
                 if (!self.ctx || self.ctx.state === 'closed') throw new Error('ctx closed');
                 var src = self.ctx.createBufferSource();
                 src.buffer = decoded;
                 src.connect(self.ctx.destination);
                 var when = Math.max(self.nextStart, self.ctx.currentTime + 0.05);
-                // Adjust when to master clock: if drift >0.05, nudge
-                var drift = (when - self.ctx.currentTime) - (master - seek);
-                // For now, just schedule gapless
+                // If new song and when is far in future (>5s), pull it in to avoid 6s gap
+                if (isNewSong && when - self.ctx.currentTime > 3.0) {
+                    when = self.ctx.currentTime + 0.1;
+                    self.nextStart = when;
+                }
                 src.start(when);
                 self.nextStart = when + decoded.duration;
                 self.fetching = false;
-                $('#ll_exact_status').text('exact • AudioContext • '+d.media.split('/').pop().substring(0,20)+' • '+(master).toFixed(1)+'s');
-                // Schedule next
+                $('#ll_exact_status').text('exact • AudioContext • '+d.media.split('/').pop().substring(0,20)+' • '+(master).toFixed(1)+'s • next '+self.nextStart.toFixed(1));
                 setTimeout(function(){ self.schedule(); }, 80);
             }).catch(function(e){
-                console.warn('AudioContext decode/fetch failed', e);
+                console.warn('AudioContext decode/fetch failed', d.media, e);
                 self.fetching = false;
-                // Fallback to native for this chunk
-                $('#ll_exact_status').text('exact • decode fail, retry');
+                // Don't stop — try next seek or next track, keep native muted
+                // If decode failed for this seek, try next second
+                if (e.message && e.message.indexOf('media not found') !== -1) {
+                    self.lastMedia = d.media + '|' + (seek+1);
+                }
                 setTimeout(function(){ self.schedule(); }, 400);
             });
         }).fail(function(){
