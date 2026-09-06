@@ -132,6 +132,15 @@ $showDevTab = $uiLevel >= 3;
 </div>
 
 <script>
+// Monotonic vs wall split — mirrors PulseMesh PendingInsertMirror discipline
+// performance.now() is CLOCK_MONOTONIC; Date.now() jumps on NTP, performance.now() does not
+var llClock = {
+    monotonicMs: function() {
+        if (window.performance && performance.now) return performance.now();
+        return Date.now();
+    },
+    wallMs: function() { return Date.now(); }
+};
 // MSE prototype for gapless, low-buffer live — falls back to native <audio> if unsupported
 var llMSE = {
     enabled: !!(window.MediaSource && window.MediaSource.isTypeSupported && window.MediaSource.isTypeSupported('audio/mpeg')),
@@ -258,6 +267,10 @@ var llPlayer = {
     initialConnect: false,
     initialConnectTimer: null,
     streamUrl: 'api/plugin/fpp-ListenLive/stream',
+    // Deadline-at-read: monotonic timestamp of last media change for confidence
+    lastMediaAnnouncedAtMono: null,
+    lastElapsedHalf: null,
+    lastSendErrorCount: 0,
     // Append cache buster to force reconnect without browser cache
     buildUrl: function() { return llPlayer.streamUrl + '?t=' + Date.now(); },
 
@@ -285,9 +298,9 @@ var llPlayer = {
             clearTimeout(llPlayer.trackChangeTimeout);
             clearTimeout(llPlayer.stalledTimer);
             clearTimeout(llPlayer.waitingTimer);
-            // Reset sync tracking — will be set on next status poll with current elapsed
+            // Reset sync tracking — will be set on next status poll with current elapsed (monotonic)
             llPlayer.streamStartElapsed = null;
-            llPlayer.streamStartTime = Date.now();
+            llPlayer.streamStartTime = llClock.monotonicMs();
             llPlayer.driftChecks = 0;
             $('#ll_badge').removeClass('ll-badge-idle ll-badge-warn').addClass('ll-badge-live').text('● LIVE');
             $('#ll_wave').removeClass('paused');
@@ -431,7 +444,7 @@ var llPlayer = {
             }
         });
         llPlayer.refreshStatus();
-        setInterval(llPlayer.refreshStatus, 2000);
+        setInterval(llPlayer.refreshStatus, 500);
         llPlayer.refreshDiagnostics();
     },
 
@@ -683,7 +696,26 @@ var llPlayer = {
                             else if (typeof s.seconds_remaining === 'number' && typeof s.seconds_elapsed === 'number') duNum = s.seconds_elapsed + s.seconds_remaining;
                             else if (remaining && !isNaN(parseInt(remaining))) duNum = parseInt(displayElapsed) + parseInt(remaining);
                         }
-                        llPlayer.updateTiming(parseInt(displayElapsed)||0, duNum, media);
+                        // Half-second dedup — mirrors PulseMesh SendMediaSyncPacket curTS
+                        var curHalf = Math.floor((parseFloat(displayElapsed)||0) * 2);
+                        var duHalf = duNum ? Math.floor(duNum * 2) : -1;
+                        var lastDuHalf = llPlayer.lastDuHalf;
+                        if (curHalf !== llPlayer.lastElapsedHalf || duHalf !== lastDuHalf || llPlayer.lastMedia !== currentMediaKey) {
+                            llPlayer.updateTiming(parseInt(displayElapsed)||0, duNum, media);
+                            llPlayer.lastElapsedHalf = curHalf;
+                            llPlayer.lastDuHalf = duHalf;
+                        }
+                        // Confidence at read time (250ms settle window) — like PendingInsertMirror view(now)
+                        var conf = 'exact';
+                        if (llPlayer.lastMediaAnnouncedAtMono !== null) {
+                            var age = llClock.monotonicMs() - llPlayer.lastMediaAnnouncedAtMono;
+                            if (age < 250) conf = 'unresolved';
+                        }
+                        // Prefer server confidence if fresher (server monotonic vs client mono not comparable, but server knows announce)
+                        if (d.timing && d.timing.confidence === 'unresolved') conf = 'unresolved';
+                        if (conf === 'unresolved' && llPlayer.isPlaying) {
+                            $('#ll_time_remaining').text($('#ll_time_remaining').text() + ' • syncing');
+                        }
                     } else {
                         $('#ll_timing').hide();
                         if ('mediaSession' in navigator) {
@@ -715,8 +747,11 @@ var llPlayer = {
                 $('#ll_src').text(settings.source || 'auto');
                 $('#ll_bitrate').text(settings.bitrate || '128k');
 
-                // Track change — server handles seamless file-sync, live is gapless, so just update display
+                // Track change — deadline-at-read confidence (mirrors PendingInsertMirror settle)
                 var currentMediaKey = (media || '') + '|' + (s.current_playlist || '') + '|' + (isBackgroundPlaying ? 'background' : 'fpp') + '|' + (media || '');
+                if (llPlayer.lastMedia !== currentMediaKey && currentMediaKey) {
+                    llPlayer.lastMediaAnnouncedAtMono = llClock.monotonicMs();
+                }
                 // File-sync is disabled per user request (live only), but keep display in sync
                 var isFileSync = false;
                 if (false && llPlayer.isPlaying && llPlayer.lastMedia && llPlayer.lastMedia !== currentMediaKey && isFileSync) {
@@ -761,10 +796,10 @@ var llPlayer = {
                     else if (d.fallback_media && typeof d.fallback_media.elapsed === 'number') currentFallbackElapsed = d.fallback_media.elapsed;
                     if (llPlayer.streamStartElapsed === null && currentFallbackElapsed > 0) {
                         llPlayer.streamStartElapsed = currentFallbackElapsed;
-                        llPlayer.streamStartTime = Date.now();
+                        llPlayer.streamStartTime = llClock.monotonicMs();
                         llPlayer.driftChecks = 0;
                     } else if (llPlayer.streamStartElapsed !== null && currentFallbackElapsed > 0) {
-                        var wallElapsed = (Date.now() - llPlayer.streamStartTime) / 1000;
+                        var wallElapsed = (llClock.monotonicMs() - llPlayer.streamStartTime) / 1000;
                         var expectedAudioTime = currentFallbackElapsed - llPlayer.streamStartElapsed;
                         var actual = llPlayer.audio.currentTime;
                         // Account for initial seek offset already in stream (stream starts at seekPos, so actual 0 = elapsed)
@@ -776,7 +811,7 @@ var llPlayer = {
                                 $('#ll_status_text').html('<span class="text-warning">Drift ' + drift.toFixed(1) + 's — re-syncing...</span>');
                                 llPlayer.driftChecks = 0;
                                 llPlayer.streamStartElapsed = currentFallbackElapsed;
-                                llPlayer.streamStartTime = Date.now();
+                                llPlayer.streamStartTime = llClock.monotonicMs();
                                 setTimeout(function(){ if (llPlayer.isPlaying) llPlayer.reconnect(); }, 400);
                             }
                         } else {

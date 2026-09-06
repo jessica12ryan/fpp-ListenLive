@@ -14,7 +14,21 @@ define('LL_SETTINGS_FILE', LL_PLUGIN_DIR . '/config/settings.json');
 define('LL_LOG_DIR', getenv('LOGDIR') ?: '/home/fpp/media/logs');
 define('LL_LOG_FILE', LL_LOG_DIR . '/plugin-fpp-ListenLive.log');
 
+// Host-testable timing helper (no FPP deps) — mirrors PulseMesh discipline
+require_once __DIR__ . '/src/Timing.php';
+
 function llLog($msg) {
+    static $errCount = 0;
+    // Throttle probe failures like PulseMesh m_sendErrorCount (suppress after 10)
+    if (strpos($msg, 'Stream probe no data') !== false) {
+        $errCount++;
+        if ($errCount > 10 && $errCount < 11) {
+            @file_put_contents(LL_LOG_FILE, date('Y-m-d H:i:s') . ' fpp-ListenLive api: further probe errors suppressed' . "\n", FILE_APPEND | LOCK_EX);
+        }
+        if ($errCount > 10) return;
+    } else {
+        $errCount = 0;
+    }
     @file_put_contents(LL_LOG_FILE, date('Y-m-d H:i:s') . ' fpp-ListenLive api: ' . $msg . "\n", FILE_APPEND | LOCK_EX);
 }
 
@@ -783,6 +797,28 @@ function llStatusEndpoint() {
     } else {
         $activeSource = 'unavailable';
     }
+    // Monotonic vs wall split — mirrors PulseMesh PendingInsertMirror epoch discipline
+    $monoMs = LLSyncTiming::monotonicMs();
+    $wallMs = LLSyncTiming::wallClockMs();
+    // epoch is wall at construction; monotonic alone cannot be converted to wall (CLOCK_MONOTONIC from boot)
+    static $epochMs = null;
+    if ($epochMs === null) $epochMs = $wallMs;
+
+    // Server-side confidence: unresolved for 250ms after any media change (track change settle)
+    $hasMedia = !empty($fallback['media']) || !empty($fppStatus['current_song']) || !empty($fppStatus['current_sequence']);
+    // Persist last media key tick via tmp file so confidence survives across PHP processes
+    $announcedAtMs = null;
+    $mediaKey = ($fallback['media'] ?? '') . '|' . ($fppStatus['current_song'] ?? '') . '|' . ($bgStatus['currentTrack'] ?? $bgStatus['filename'] ?? '');
+    $announceFile = sys_get_temp_dir() . '/ll_media_announce.json';
+    $prev = @json_decode(@file_get_contents($announceFile), true);
+    if (!is_array($prev) || ($prev['key'] ?? '') !== $mediaKey) {
+        $announcedAtMs = $monoMs;
+        @file_put_contents($announceFile, json_encode(['key' => $mediaKey, 'at' => $monoMs]));
+    } else {
+        $announcedAtMs = isset($prev['at']) ? (float)$prev['at'] : $monoMs;
+    }
+    $confidence = LLSyncTiming::confidence((float)$monoMs, $announcedAtMs, (bool)$hasMedia);
+
     return llJson([
         'success' => true,
         'settings' => $settings,
@@ -794,7 +830,14 @@ function llStatusEndpoint() {
         'active_source' => $activeSource,
         'now_playing' => $nowPlaying,
         'stream_url' => 'api/plugin/fpp-ListenLive/stream',
-        'media_url' => 'api/plugin/fpp-ListenLive/media'
+        'media_url' => 'api/plugin/fpp-ListenLive/media',
+        'timing' => [
+            'monotonic_ms' => $monoMs,
+            'wall_ms' => $wallMs,
+            'epoch_ms' => $epochMs,
+            'confidence' => $confidence,
+            'announced_at_ms' => $announcedAtMs,
+        ]
     ]);
 }
 
@@ -1113,8 +1156,8 @@ function llStreamFileSync($isExplicitFileMode) {
             ignore_user_abort(true);
             @ini_set('zlib.output_compression', '0');
             ob_implicit_flush(1);
-            // Use -ss before -i for fast seek; subtract 1.3s for startup/network/ffmpeg latency so client is slightly behind, not ahead
-            $seekPos = max(0, $elapsed - 1.3);
+            // Use Timing helper — mirrors PulseMesh seek discipline (behind, never ahead)
+            $seekPos = LLSyncTiming::seekPosition($elapsed, LLSyncTiming::SEEK_LATENCY_S);
             // For gapless, stream only remaining duration (duration - elapsed) if known, else stream to EOF
             $duration = 0;
             if (isset($fallback['bgStatus']['trackDuration']) && is_numeric($fallback['bgStatus']['trackDuration'])) $duration = (float)$fallback['bgStatus']['trackDuration'];
@@ -1141,7 +1184,7 @@ function llStreamFileSync($isExplicitFileMode) {
                         $path = $nextFallback['path'];
                         $elapsed = (float)($nextFallback['elapsed'] ?? 0);
                         llLog('Stream file sync seamless to next track: ' . $path . ' elapsed=' . $elapsed);
-                        $seekPos = max(0, $elapsed - 0.5);
+                        $seekPos = LLSyncTiming::seekPosition($elapsed, LLSyncTiming::SEEK_LATENCY_SEAMLESS_S);
                         $cmd2 = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)$seekPos) . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -f mp3 -flush_packets 1 -';
                         $handle2 = @popen($cmd2 . ' 2>/dev/null', 'r');
                         if ($handle2) {
@@ -1166,10 +1209,9 @@ function llStreamFileSync($isExplicitFileMode) {
         $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
         $mimeMap = ['mp3'=>'audio/mpeg','ogg'=>'audio/ogg','wav'=>'audio/wav','flac'=>'audio/flac','m4a'=>'audio/mp4','aac'=>'audio/aac'];
         if (isset($mimeMap[$ext])) $mime = $mimeMap[$ext];
-        // For mp3, try byte offset seek (less accurate, fallback)
+        // For mp3, try byte offset seek (less accurate, fallback) — via Timing helper
         if ($ext === 'mp3' && $elapsed > 1) {
-            $bitrateBytes = 16000;
-            $offset = (int)(max(0, $elapsed - 1.3) * $bitrateBytes);
+            $offset = LLSyncTiming::byteOffset($elapsed, LLSyncTiming::SEEK_LATENCY_S, LLSyncTiming::BYTES_PER_SEC_128K);
             $size = filesize($path);
             if ($offset < $size) {
                 header('Content-Type: audio/mpeg');
