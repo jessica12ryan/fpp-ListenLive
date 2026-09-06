@@ -263,18 +263,21 @@ var llPlayer = {
         llPlayer.audio.addEventListener('stalled', function() {
             if (llPlayer.trackChangePending || llPlayer.initialConnect) return;
             clearTimeout(llPlayer.stalledTimer);
+            var isLongPlayStalled = llPlayer.audio.currentTime > 50;
             llPlayer.stalledTimer = setTimeout(function(){
                 if (llPlayer.audio.readyState < 2 && llPlayer.isPlaying && !llPlayer.audio.paused && !llPlayer.trackChangePending && !llPlayer.initialConnect) {
-                    $('#ll_status_text').html('<span class="text-warning">Buffering...</span>');
+                    var played = llPlayer.audio.currentTime;
+                    var isLongPlay = played > 50;
+                    $('#ll_status_text').html('<span class="text-warning">Buffering' + (isLongPlay ? ' (long play)': '') + '...</span>');
                     clearTimeout(llPlayer.stalledTimer);
                     llPlayer.stalledTimer = setTimeout(function(){
                         if (llPlayer.audio.readyState < 2 && llPlayer.isPlaying && !llPlayer.trackChangePending) {
                             $('#ll_status_text').html('<span class="text-warning">Buffering timeout — re-syncing...</span>');
                             llPlayer.reconnect();
                         }
-                    }, 4000);
+                    }, isLongPlay ? 2000 : 4000);
                 }
-            }, 1500);
+            }, isLongPlayStalled ? 800 : 1500);
         });
         llPlayer.audio.addEventListener('waiting', function() {
             if (llPlayer.trackChangePending || llPlayer.initialConnect) return;

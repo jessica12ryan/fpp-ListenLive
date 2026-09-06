@@ -962,22 +962,39 @@ function llStreamEndpoint() {
         stream_set_blocking($handle, true);
         echo $buffer;
         flush();
+        $lastFlush = microtime(true);
+        $bytesSent = strlen($buffer);
         while (!feof($handle) && connection_status() === CONNECTION_NORMAL) {
             $chunk = fread($handle, 8192);
             if ($chunk === false) break;
             if ($chunk !== '') {
                 echo $chunk;
                 flush();
-                usleep(5000);
+                $bytesSent += strlen($chunk);
+                $lastFlush = microtime(true);
+                // Small pacing to avoid overwhelming client, but not too much for live
+                usleep(2000);
             } else {
                 // Check if proc died
                 if ($proc) {
                     $st = proc_get_status($proc);
                     if (!$st['running']) break;
                 } else if (feof($handle)) break;
+                // Keepalive: if no data for 1s but we have sent data, send a tiny keepalive comment to prevent proxy timeout
+                if (microtime(true) - $lastFlush > 1.0 && $bytesSent > 0) {
+                    // Send MP3 Xing header as keepalive (4 bytes of silence frame)
+                    // Instead, just flush and continue
+                    flush();
+                    $lastFlush = microtime(true);
+                }
                 usleep(10000);
             }
             if (connection_aborted()) break;
+            // Watchdog: if we haven't sent data in 30s but should be live, log and continue
+            if (microtime(true) - $lastFlush > 30 && $bytesSent > 10000) {
+                llLog('Stream live still running but no data for 30s: ' . $label . ' sent=' . $bytesSent);
+                $lastFlush = microtime(true);
+            }
         }
         // Check why we exited — log for debugging drops after ~60s
         $aborted = connection_aborted();
