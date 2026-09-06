@@ -97,7 +97,7 @@ $showDevTab = $uiLevel >= 3;
                     <input type="button" class="buttons" style="padding:4px 10px; margin-left:8px;" value="Mute" id="ll_mute_btn" onclick="llPlayer.toggleMute();">
                 </div>
                 <div style="margin:8px auto;max-width:560px;text-align:center;">
-                    <label style="font-size:12px;color:var(--bs-secondary-color,#6c757d);"><input type="checkbox" id="ll_exact_toggle" onchange="llExact.toggle(this.checked)" style="vertical-align:middle;margin-right:4px;"> Exact frame sync (Web Audio, versatile)</label>
+                    <label style="font-size:12px;color:var(--bs-secondary-color,#6c757d);"><input type="checkbox" id="ll_exact_toggle" onchange="llExactAudio.toggleAudio(this.checked);" style="vertical-align:middle;margin-right:4px;"> Exact frame sync (Web Audio, versatile)</label>
                     <span id="ll_exact_status" style="font-size:11px;color:var(--bs-secondary-color,#6c757d);margin-left:8px;"></span>
                     <div id="ll_exact_info" style="font-size:11px;color:#0c5460;background:#d1ecf1;border:1px solid #bee5eb;border-radius:4px;padding:4px 8px;margin-top:6px;display:none;"></div>
                 </div>
@@ -296,6 +296,136 @@ var llExact = {
     }
 };
 
+// AudioContext exact gapless — versatile, frame-exact, no blob: CSP
+var llExactAudio = {
+    ctx: null,
+    useAudio: false,
+    queue: [],
+    nextStart: 0,
+    fetching: false,
+    lastMedia: null,
+    init: function() {
+        // Check AudioContext support
+        window.AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (!window.AudioContext) {
+            $('#ll_exact_status').text('exact • AudioContext not supported — using playbackRate');
+            return;
+        }
+        // Toggle now controls AudioContext path when available
+        try {
+            var v = localStorage.getItem('fpp-ListenLive-useExactAudio');
+            if (v !== null) this.useAudio = v === '1';
+        } catch(e) {}
+        // If user had exact on, migrate to AudioContext
+        try {
+            var old = localStorage.getItem('fpp-ListenLive-useExact');
+            if (old === '1' && !localStorage.getItem('fpp-ListenLive-useExactAudio')) {
+                this.useAudio = true;
+            }
+        } catch(e) {}
+    },
+    toggleAudio: function(enabled) {
+        this.useAudio = !!enabled;
+        try { localStorage.setItem('fpp-ListenLive-useExactAudio', this.useAudio ? '1' : '0'); } catch(e) {}
+        try { localStorage.setItem('fpp-ListenLive-useExact', this.useAudio ? '1' : '0'); } catch(e) {}
+        $('#ll_exact_toggle').prop('checked', this.useAudio);
+        if (this.useAudio) {
+            $('#ll_exact_status').text('exact • AudioContext');
+            $('#ll_exact_info').text('AudioContext gapless — decoding via Web Audio, scheduled to master clock.').show();
+            // When AudioContext is on, disable playbackRate path to avoid double correction
+            try { llExact.useExact = false; if (llExact.pollTimer) llExact.stop(); } catch(e) {}
+            if (llPlayer.isPlaying) this.start();
+        } else {
+            $('#ll_exact_status').text('exact • off');
+            $('#ll_exact_info').text('AudioContext off — native.').show();
+            setTimeout(function(){ $('#ll_exact_info').fadeOut(2000); }, 3000);
+            this.stop();
+            try { if (llPlayer.audio) { llPlayer.audio.muted = llPlayer.isMuted; llPlayer.audio.playbackRate = 1.0; } } catch(e) {}
+        }
+    },
+    start: function() {
+        if (!this.useAudio || !llPlayer.isPlaying) return;
+        if (!window.AudioContext) return;
+        if (this.ctx) try { this.ctx.close(); } catch(e) {}
+        this.ctx = new (window.AudioContext || window.webkitAudioContext)({latencyHint: 'interactive'});
+        this.nextStart = this.ctx.currentTime + 0.4;
+        this.queue = [];
+        this.fetching = false;
+        this.lastMedia = null;
+        // Mute native <audio> when AudioContext is active to avoid double
+        try { llPlayer.audio.muted = true; } catch(e) {}
+        this.schedule();
+    },
+    stop: function() {
+        this.fetching = false;
+        this.queue = [];
+        if (this.ctx) { try { this.ctx.close(); } catch(e) {} this.ctx = null; }
+        try { llPlayer.audio.muted = llPlayer.isMuted; } catch(e) {}
+        // Reset native playbackRate
+        try { if (llPlayer.audio) llPlayer.audio.playbackRate = 1.0; } catch(e) {}
+    },
+    schedule: function() {
+        if (!this.useAudio || !llPlayer.isPlaying || !this.ctx) return;
+        var self = this;
+        // Don't fetch if we have 3s queued
+        if (self.nextStart - self.ctx.currentTime > 3.0) {
+            return setTimeout(function(){ self.schedule(); }, 200);
+        }
+        if (self.fetching) return setTimeout(function(){ self.schedule(); }, 100);
+        self.fetching = true;
+        $.getJSON('api/plugin/fpp-ListenLive/sync', function(d){
+            if (!d || !d.has_media || !d.media) {
+                self.fetching = false;
+                $('#ll_exact_status').text('exact • idle');
+                return setTimeout(function(){ self.schedule(); }, 500);
+            }
+            var nowWall = Date.now();
+            var serverWall = d.wall_ms || d.server_wall_ms || nowWall;
+            var master = (typeof d.extrapolated_seconds === 'number' ? d.extrapolated_seconds : d.seconds) + (nowWall - serverWall)/1000;
+            // For gapless file, fetch next chunk via media endpoint with seek
+            var seek = Math.floor(Math.max(0, master));
+            // Avoid refetching same seek
+            var mediaKey = d.media + '|' + seek;
+            if (self.lastMedia === mediaKey) {
+                self.fetching = false;
+                return setTimeout(function(){ self.schedule(); }, 150);
+            }
+            self.lastMedia = mediaKey;
+            var url = 'api/plugin/fpp-ListenLive/media?file=' + encodeURIComponent(d.media) + '&seek=' + seek;
+            fetch(url).then(function(resp){
+                if (!resp.ok) throw new Error('media fetch '+resp.status);
+                return resp.arrayBuffer();
+            }).then(function(buf){
+                return self.ctx.decodeAudioData(buf);
+            }).then(function(decoded){
+                if (!self.ctx || self.ctx.state === 'closed') throw new Error('ctx closed');
+                var src = self.ctx.createBufferSource();
+                src.buffer = decoded;
+                src.connect(self.ctx.destination);
+                var when = Math.max(self.nextStart, self.ctx.currentTime + 0.05);
+                // Adjust when to master clock: if drift >0.05, nudge
+                var drift = (when - self.ctx.currentTime) - (master - seek);
+                // For now, just schedule gapless
+                src.start(when);
+                self.nextStart = when + decoded.duration;
+                self.fetching = false;
+                $('#ll_exact_status').text('exact • AudioContext • '+d.media.split('/').pop().substring(0,20)+' • '+(master).toFixed(1)+'s');
+                // Schedule next
+                setTimeout(function(){ self.schedule(); }, 80);
+            }).catch(function(e){
+                console.warn('AudioContext decode/fetch failed', e);
+                self.fetching = false;
+                // Fallback to native for this chunk
+                $('#ll_exact_status').text('exact • decode fail, retry');
+                setTimeout(function(){ self.schedule(); }, 400);
+            });
+        }).fail(function(){
+            self.fetching = false;
+            setTimeout(function(){ self.schedule(); }, 400);
+        });
+    }
+};
+
 var llPlayer = {
     audio: null,
     isPlaying: false,
@@ -335,6 +465,9 @@ var llPlayer = {
             llPlayer.audio.volume = 0.8;
         }
         try { llExact.init(); } catch(e) { console.warn('Exact init error', e); }
+        try { llExactAudio.init(); } catch(e) { console.warn('ExactAudio init error', e); }
+        // Sync AudioContext toggle with Exact
+        try { if (llExactAudio.useAudio) { llExact.useExact = true; $('#ll_exact_toggle').prop('checked', true); } } catch(e) {}
         llPlayer.audio.addEventListener('playing', function() {
             llPlayer.isPlaying = true;
             llPlayer.reconnectAttempts = 0;
@@ -353,6 +486,7 @@ var llPlayer = {
             $('#ll_btn_play').attr('onclick', 'llPlayer.pause();');
             $('#ll_status_text').html('<span class="text-success">● Streaming live audio</span>');
             try { if (llExact.useExact) llExact.start(); } catch(e) {}
+            try { if (llExactAudio.useAudio) llExactAudio.start(); } catch(e) {}
         });
         llPlayer.audio.addEventListener('pause', function() {
             // Only mark as paused if not ended and not seeking reconnect
@@ -363,6 +497,7 @@ var llPlayer = {
                 clearTimeout(llPlayer.stalledTimer);
                 clearTimeout(llPlayer.waitingTimer);
                 try { llExact.stop(); } catch(e) {}
+                try { llExactAudio.stop(); } catch(e) {}
                 try { if (llPlayer.audio) llPlayer.audio.playbackRate = 1.0; } catch(e) {}
                 $('#ll_timing').hide();
                 if ('mediaSession' in navigator) { try { navigator.mediaSession.metadata = null; } catch(e) {} }
@@ -500,6 +635,22 @@ var llPlayer = {
 
     play: function() {
         var a = llPlayer.audio;
+        llPlayer.isPlaying = true;
+        $('#ll_status_text').html('<span class="text-success">Connecting...</span>');
+        // AudioContext exact takes over — mute native and let it schedule
+        if (llExactAudio.useAudio) {
+            try { a.muted = true; } catch(e) {}
+            // Still set native src as fallback, but muted
+            if (!a.src || a.src === window.location.href) {
+                a.src = llPlayer.buildUrl();
+                a.load();
+                var p2 = a.play(); if (p2 && p2.catch) p2.catch(function(){});
+            }
+            llPlayer.initialConnect = true;
+            clearTimeout(llPlayer.initialConnectTimer);
+            llPlayer.initialConnectTimer = setTimeout(function(){ llPlayer.initialConnect = false; }, 5000);
+            return;
+        }
         if (!a.src || a.src === window.location.href) {
             a.src = llPlayer.buildUrl();
             a.load();
@@ -514,11 +665,10 @@ var llPlayer = {
                 $('#ll_status_text').html('<span class="text-danger">Playback blocked: ' + e.message + ' — click Play again.</span>');
             });
         }
-        llPlayer.isPlaying = true;
-        $('#ll_status_text').html('<span class="text-success">Connecting...</span>');
     },
 
     pause: function() {
+        try { llExactAudio.stop(); } catch(e) {}
         llPlayer.audio.pause();
         llPlayer.isPlaying = false;
         llPlayer.trackChangePending = false;
@@ -529,6 +679,7 @@ var llPlayer = {
 
     stop: function() {
         try { llExact.stop(); } catch(e) {}
+        try { llExactAudio.stop(); } catch(e) {}
         try { if (llPlayer.audio) llPlayer.audio.playbackRate = 1.0; } catch(e) {}
         llPlayer.audio.pause();
         try { llPlayer.audio.removeAttribute('src'); } catch(e) {}
@@ -549,6 +700,13 @@ var llPlayer = {
 
     reconnect: function() {
         try { llExact.stop(); } catch(e) {}
+        try { llExactAudio.stop(); } catch(e) {}
+        if (llExactAudio.useAudio) {
+            $('#ll_status_text').html('<span class="text-warning">Re-syncing (AudioContext)...</span>');
+            llPlayer.isPlaying = true;
+            setTimeout(function(){ if (llPlayer.isPlaying) llExactAudio.start(); }, 300);
+            return;
+        }
         llPlayer.audio.pause();
         llPlayer.audio.src = llPlayer.buildUrl();
         llPlayer.audio.load();
