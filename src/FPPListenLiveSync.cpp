@@ -46,8 +46,11 @@ public:
           m_epochWall(wallClockMs()),
           m_lastMediaHalf(-1)
     {
-        LogInfo(VB_PLUGIN, "Initializing ListenLive Sync Plugin (frame-exact)\n");
+        LogInfo(VB_PLUGIN, "Initializing ListenLive Sync Plugin (frame-exact, versatile)\n");
         MultiSync::INSTANCE.addMultiSyncPlugin(this);
+        if (!MultiSync::INSTANCE.isMultiSyncEnabled()) {
+            WarningHolder::AddWarning("ListenLive Sync: MultiSync not enabled — exact frame sync will use fallback (status poll) not master clock. Enable MultiSync (FPP Settings → MultiSync) for versatile exact across Player/Remote.");
+        }
     }
 
     virtual ~FPPListenLiveSyncPlugin()

@@ -305,24 +305,33 @@ var llExactAudio = {
     fetching: false,
     lastMedia: null,
     init: function() {
-        // Check AudioContext support
         window.AudioContext = window.AudioContext || window.webkitAudioContext;
         if (!window.AudioContext) {
-            $('#ll_exact_status').text('exact • AudioContext not supported — using playbackRate');
+            $('#ll_exact_status').text('exact • AudioContext not supported — using native');
             return;
         }
-        // Toggle now controls AudioContext path when available
+        // Default on for exact gapless (versatile, frame-exact) — user can opt-out
+        this.useAudio = true;
         try {
             var v = localStorage.getItem('fpp-ListenLive-useExactAudio');
             if (v !== null) this.useAudio = v === '1';
-        } catch(e) {}
-        // If user had exact on, migrate to AudioContext
-        try {
+            else {
+                // First visit: default on, persist
+                localStorage.setItem('fpp-ListenLive-useExactAudio', '1');
+                localStorage.setItem('fpp-ListenLive-useExact', '1');
+            }
             var old = localStorage.getItem('fpp-ListenLive-useExact');
             if (old === '1' && !localStorage.getItem('fpp-ListenLive-useExactAudio')) {
                 this.useAudio = true;
             }
         } catch(e) {}
+        // Reflect default in UI
+        try { $('#ll_exact_toggle').prop('checked', this.useAudio); } catch(e) {}
+        if (this.useAudio) {
+            $('#ll_exact_status').text('exact • AudioContext • default on');
+            $('#ll_exact_info').text('Exact frame sync default on — AudioContext gapless, multisync master when available (fallback to native when idle).').show();
+            setTimeout(function(){ $('#ll_exact_info').fadeOut(4000); }, 4000);
+        }
     },
     toggleAudio: function(enabled) {
         this.useAudio = !!enabled;
