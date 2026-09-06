@@ -73,6 +73,16 @@ $showDevTab = $uiLevel >= 3;
                 </div>
 
                 <audio id="ll_audio" controls preload="none" playsinline></audio>
+                <div id="ll_timing" class="ll-timing" style="max-width:560px;margin:8px auto 4px auto;text-align:center;display:none;">
+                    <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--bs-secondary-color,#6c757d);margin-bottom:4px;">
+                        <span id="ll_time_elapsed">00:00</span>
+                        <span id="ll_time_duration">--:--</span>
+                    </div>
+                    <div style="height:6px;background:var(--bs-secondary-bg,#e9ecef);border-radius:3px;overflow:hidden;">
+                        <div id="ll_progress" style="height:100%;width:0%;background:#0d6efd;transition:width 0.3s linear;"></div>
+                    </div>
+                    <div id="ll_time_remaining" style="font-size:11px;color:var(--bs-secondary-color,#6c757d);margin-top:2px;"></div>
+                </div>
 
                 <div class="ll-controls">
                     <input type="button" class="buttons" id="ll_btn_play" value="▶ Play" onclick="llPlayer.play();">
@@ -381,6 +391,38 @@ var llPlayer = {
         }
     },
 
+    formatTime: function(sec) {
+        sec = Math.max(0, Math.floor(sec));
+        var m = Math.floor(sec / 60), s = sec % 60;
+        return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+    },
+    updateTiming: function(elapsed, duration, media) {
+        var el = elapsed || 0, du = duration || 0;
+        $('#ll_time_elapsed').text(llPlayer.formatTime(el));
+        if (du > 0) {
+            $('#ll_time_duration').text(llPlayer.formatTime(du));
+            $('#ll_time_remaining').text('-' + llPlayer.formatTime(Math.max(0, du - el)) + ' remaining');
+            $('#ll_progress').css('width', Math.min(100, (el/du)*100) + '%');
+        } else {
+            $('#ll_time_duration').text(du ? llPlayer.formatTime(du) : 'Live');
+            $('#ll_time_remaining').text(du ? '' : 'Live • chunked');
+            $('#ll_progress').css('width', el > 0 ? '100%' : '0%');
+        }
+        $('#ll_timing').show();
+        // Media Session for lock-screen
+        if ('mediaSession' in navigator && media) {
+            try {
+                navigator.mediaSession.metadata = new MediaMetadata({
+                    title: media.split('/').pop().split('.')[0] || 'Listen Live',
+                    artist: 'FPP • ' + (isBackgroundPlaying ? 'Background' : 'Show'),
+                    album: 'FPP Listen Live'
+                });
+                if (du > 0 && 'setPositionState' in navigator.mediaSession) {
+                    navigator.mediaSession.setPositionState({duration: du, playbackRate: 1, position: Math.min(el, du)});
+                }
+            } catch(e) {}
+        }
+    },
     refreshStatus: function() {
         $.ajax({
             url: 'api/plugin/fpp-ListenLive/status',
@@ -425,6 +467,7 @@ var llPlayer = {
                 if (!media || media === 'false' || media === '') {
                     $('#ll_nowplaying').html('<span class="text-secondary">Nothing playing — FPP is idle</span>');
                     $('#ll_elapsed').text('—');
+                    $('#ll_timing').hide();
                 } else {
                     var elapsed = s.seconds_elapsed || s.time_elapsed || np.seconds_elapsed || 0;
                     var remaining = s.seconds_remaining || s.time_remaining || '';
@@ -444,6 +487,12 @@ var llPlayer = {
                     }
                     $('#ll_nowplaying').text(media);
                     $('#ll_elapsed').text((elapsed || '0') + (remaining ? ' / ' + remaining : ''));
+                    // Update custom timing bar + Media Session (keeps live chunked, not seekable)
+                    var duNum = 0;
+                    if (isBackgroundPlaying && d.background_status && typeof d.background_status.trackDuration === 'number') duNum = d.background_status.trackDuration;
+                    else if (typeof s.seconds_remaining === 'number' && typeof s.seconds_elapsed === 'number') duNum = s.seconds_elapsed + s.seconds_remaining;
+                    else if (remaining && !isNaN(parseInt(remaining))) duNum = parseInt(elapsed) + parseInt(remaining);
+                    llPlayer.updateTiming(parseInt(elapsed)||0, duNum, media);
                     if (isBackgroundPlaying && !s.current_song && d.background_status) {
                         var bgType = d.background_status ? 'background' : 'afterhours';
                         $('#ll_nowplaying').html(escHtml(media) + ' <span class="ll-badge" style="background:#198754;color:#fff;font-size:11px;">via ' + escHtml(bgType) + '</span>');
