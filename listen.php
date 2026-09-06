@@ -182,6 +182,8 @@ var llPlayer = {
                 clearTimeout(llPlayer.trackChangeTimeout);
                 clearTimeout(llPlayer.stalledTimer);
                 clearTimeout(llPlayer.waitingTimer);
+                $('#ll_timing').hide();
+                if ('mediaSession' in navigator) { try { navigator.mediaSession.metadata = null; } catch(e) {} }
                 $('#ll_badge').removeClass('ll-badge-live').addClass('ll-badge-idle').text('Paused');
                 $('#ll_wave').addClass('paused');
                 $('#ll_btn_play').val('▶ Play');
@@ -350,6 +352,8 @@ var llPlayer = {
         clearTimeout(llPlayer.trackChangeTimeout);
         clearTimeout(llPlayer.stalledTimer);
         clearTimeout(llPlayer.waitingTimer);
+        $('#ll_timing').hide();
+        if ('mediaSession' in navigator) { try { navigator.mediaSession.metadata = null; } catch(e) {} }
         $('#ll_badge').removeClass('ll-badge-live ll-badge-warn').addClass('ll-badge-idle').text('Stopped');
         $('#ll_wave').addClass('paused');
         $('#ll_status_text').html('<span class="text-secondary">Stopped</span>');
@@ -400,6 +404,10 @@ var llPlayer = {
         return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
     },
     updateTiming: function(elapsed, duration, media) {
+        if (!llPlayer.isPlaying) {
+            $('#ll_timing').hide();
+            return;
+        }
         var el = elapsed || 0, du = duration || 0;
         $('#ll_time_elapsed').text(llPlayer.formatTime(el));
         if (du > 0) {
@@ -490,12 +498,19 @@ var llPlayer = {
                     }
                     $('#ll_nowplaying').text(media);
                     $('#ll_elapsed').text((elapsed || '0') + (remaining ? ' / ' + remaining : ''));
-                    // Update custom timing bar + Media Session (keeps live chunked, not seekable)
-                    var duNum = 0;
-                    if (isBackgroundPlaying && d.background_status && typeof d.background_status.trackDuration === 'number') duNum = d.background_status.trackDuration;
-                    else if (typeof s.seconds_remaining === 'number' && typeof s.seconds_elapsed === 'number') duNum = s.seconds_elapsed + s.seconds_remaining;
-                    else if (remaining && !isNaN(parseInt(remaining))) duNum = parseInt(elapsed) + parseInt(remaining);
-                    llPlayer.updateTiming(parseInt(elapsed)||0, duNum, media);
+                    // Update custom timing bar + Media Session only when playing (per user request)
+                    if (llPlayer.isPlaying) {
+                        var duNum = 0;
+                        if (isBackgroundPlaying && d.background_status && typeof d.background_status.trackDuration === 'number') duNum = d.background_status.trackDuration;
+                        else if (typeof s.seconds_remaining === 'number' && typeof s.seconds_elapsed === 'number') duNum = s.seconds_elapsed + s.seconds_remaining;
+                        else if (remaining && !isNaN(parseInt(remaining))) duNum = parseInt(elapsed) + parseInt(remaining);
+                        llPlayer.updateTiming(parseInt(elapsed)||0, duNum, media);
+                    } else {
+                        $('#ll_timing').hide();
+                        if ('mediaSession' in navigator) {
+                            try { navigator.mediaSession.metadata = null; } catch(e) {}
+                        }
+                    }
                     if (isBackgroundPlaying && !s.current_song && d.background_status) {
                         var bgType = d.background_status ? 'background' : 'afterhours';
                         $('#ll_nowplaying').html(escHtml(media) + ' <span class="ll-badge" style="background:#198754;color:#fff;font-size:11px;">via ' + escHtml(bgType) + '</span>');

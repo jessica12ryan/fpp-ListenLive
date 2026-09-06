@@ -1113,10 +1113,15 @@ function llStreamFileSync($isExplicitFileMode) {
             ignore_user_abort(true);
             @ini_set('zlib.output_compression', '0');
             ob_implicit_flush(1);
-            // Use -ss before -i for fast seek; subtract 1.3s for startup/network/ffmpeg latency so client is slightly behind, not ahead (user reported few seconds drift)
+            // Use -ss before -i for fast seek; subtract 1.3s for startup/network/ffmpeg latency so client is slightly behind, not ahead
             $seekPos = max(0, $elapsed - 1.3);
-            // Use -copyts and -start_at_zero to keep timestamps correct for gapless
-            $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)$seekPos) . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -f mp3 -flush_packets 1 -';
+            // For gapless, stream only remaining duration (duration - elapsed) if known, else stream to EOF
+            $duration = 0;
+            if (isset($fallback['bgStatus']['trackDuration']) && is_numeric($fallback['bgStatus']['trackDuration'])) $duration = (float)$fallback['bgStatus']['trackDuration'];
+            elseif (isset($fallback['bgStatus']['duration']) && is_numeric($fallback['bgStatus']['duration'])) $duration = (float)$fallback['bgStatus']['duration'];
+            $remaining = $duration > 0 ? max(0, $duration - $elapsed) : 0;
+            $durationArg = $remaining > 0 ? ' -t ' . escapeshellarg((string)($remaining + 0.5)) : '';
+            $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)$seekPos) . $durationArg . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -f mp3 -flush_packets 1 -';
             $handle = @popen($cmd . ' 2>/dev/null', 'r');
             if ($handle) {
                 while (!feof($handle) && connection_status() === CONNECTION_NORMAL) {
