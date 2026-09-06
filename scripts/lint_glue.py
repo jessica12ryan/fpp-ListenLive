@@ -65,12 +65,15 @@ if "llClock" not in listen or "monotonicMs" not in listen:
     fail("listen.php does not define llClock.monotonicMs — monotonic vs wall split missing on client")
 if "performance.now" not in listen:
     fail("listen.php does not use performance.now — should use monotonic clock, not Date.now")
-# llClock must appear before llMSE/llPlayer so init can use it
+# llClock must appear before llPlayer so init can use it
 if listen.find("llClock") > listen.find("var llPlayer"):
     fail("listen.php defines llClock AFTER llPlayer — must be before so playing handler can use llClock.monotonicMs()")
 # playing handler must use monotonic, not Date.now
 if re.search(r"streamStartTime\s*=\s*Date\.now\(\)", listen):
     fail("listen.php still assigns streamStartTime = Date.now() — should be llClock.monotonicMs()")
+# MSE removed — native + Exact is the path (CSP blocks blob:)
+if "llMSE" in listen or "MSE gapless" in listen:
+    fail("listen.php still contains MSE prototype — should be removed, native gapless + Exact is the path")
 
 # 5. Half-second dedup — mirrors FPPPulseMesh.cpp:131 curTS = seconds*2
 if "lastElapsedHalf" not in listen or "curHalf" not in listen:
