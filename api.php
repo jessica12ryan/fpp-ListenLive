@@ -849,7 +849,7 @@ function llStreamEndpoint() {
     // Strictly file sync per user request — no OS-level fallback
     $preFallback = llGetFallbackMedia();
     if ($preFallback && (!empty($preFallback['path']) || !empty($preFallback['streamUrl']))) {
-        llLog('Stream: file-sync for ' + $preFallback['type'] + ' - ' + $preFallback['media']);
+        llLog('Stream: file-sync for ' . $preFallback['type'] . ' - ' . $preFallback['media']);
         return llStreamFileSync(false);
     }
     header('HTTP/1.1 503 Service Unavailable');
