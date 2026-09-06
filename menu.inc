@@ -14,13 +14,13 @@ $menuEntries = Array(
 	Array(
 		'text' => '<img src="' . $llIconUrl . '" width="16" height="16" class="align-middle me-1"> Listen Live',
 		'type' => 'content',
-		'page' => 'listen.php',
+		'page' => 'config.php',
 		'wrap' => 1
 	),
 	Array(
 		'text' => '<img src="' . $llIconUrl . '" width="16" height="16" class="align-middle me-1"> Listen Live',
 		'type' => 'status',
-		'page' => 'status.php',
+		'page' => 'listen.php',
 		'wrap' => 1
 	),
 	Array(

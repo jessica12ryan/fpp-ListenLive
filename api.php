@@ -1110,6 +1110,30 @@ function llStreamFileSync($isExplicitFileMode) {
                 }
                 pclose($handle);
                 llLog('Stream file sync transcoded ended: ' . $path);
+                // Seamless: if still connected and track changed, continue with next file without closing
+                if (connection_status() === CONNECTION_NORMAL && !connection_aborted()) {
+                    // Wait briefly for next track status to settle (crossfade)
+                    usleep(300000);
+                    $nextFallback = llGetFallbackMedia();
+                    if ($nextFallback && $nextFallback['path'] && $nextFallback['path'] !== $path && file_exists($nextFallback['path'])) {
+                        $path = $nextFallback['path'];
+                        $elapsed = (float)($nextFallback['elapsed'] ?? 0);
+                        llLog('Stream file sync seamless to next track: ' . $path . ' elapsed=' . $elapsed);
+                        $seekPos = max(0, $elapsed - 0.5);
+                        $cmd2 = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)$seekPos) . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -f mp3 -flush_packets 1 -';
+                        $handle2 = @popen($cmd2 . ' 2>/dev/null', 'r');
+                        if ($handle2) {
+                            while (!feof($handle2) && connection_status() === CONNECTION_NORMAL) {
+                                $chunk2 = fread($handle2, 8192);
+                                if ($chunk2 !== false && $chunk2 !== '') { echo $chunk2; flush(); usleep(5000); }
+                                if (connection_aborted()) break;
+                                if ($chunk2 === '' || $chunk2 === false) usleep(15000);
+                            }
+                            pclose($handle2);
+                            llLog('Stream file sync next track ended: ' . $path);
+                        }
+                    }
+                }
                 exit;
             }
         }

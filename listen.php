@@ -179,17 +179,18 @@ var llPlayer = {
             }
         });
         llPlayer.audio.addEventListener('ended', function() {
-            // File-sync streams end at EOF — auto-advance to next track if still intended to play
+            // With server-side seamless file-sync, ended should rarely fire (server concatenates)
+            // If it does (file-sync without seamless or live gap), just update display, don't auto-reconnect immediately
+            // Next status poll will show new track; server will already be streaming it if seamless
             if (llPlayer.isPlaying) {
-                $('#ll_status_text').html('<span class="text-warning">Track ended — loading next...</span>');
-                llPlayer.trackChangePending = false;
-                clearTimeout(llPlayer.trackChangeTimeout);
+                $('#ll_status_text').html('<span class="text-secondary">Track ended — waiting for next...</span>');
+                // Don't auto-reconnect here for seamless server — let status poll handle display
+                // Only reconnect if still ended after 2s and no new track (fallback)
                 setTimeout(function(){
-                    if (llPlayer.isPlaying) {
-                        llPlayer.reconnectAttempts = 0;
+                    if (llPlayer.isPlaying && llPlayer.audio.ended) {
                         llPlayer.reconnect();
                     }
-                }, 700);
+                }, 2000);
             }
         });
         llPlayer.audio.addEventListener('suspend', function() {
@@ -463,11 +464,11 @@ var llPlayer = {
                 $('#ll_src').text(settings.source || 'auto');
                 $('#ll_bitrate').text(settings.bitrate || '128k');
 
-                // Live capture is gapless — no reconnect needed for track changes when liveAvailable
-                // File-sync is disabled per user request, so never auto-reconnect for track change
+                // Track change — server handles seamless file-sync, live is gapless, so just update display
                 var currentMediaKey = (media || '') + '|' + (s.current_playlist || '') + '|' + (isBackgroundPlaying ? 'background' : 'fpp') + '|' + (media || '');
-                var isFileSync = false; // file sync disabled — live capture only
-                if (llPlayer.isPlaying && llPlayer.lastMedia && llPlayer.lastMedia !== currentMediaKey && isFileSync) {
+                // File-sync is disabled per user request (live only), but keep display in sync
+                var isFileSync = false;
+                if (false && llPlayer.isPlaying && llPlayer.lastMedia && llPlayer.lastMedia !== currentMediaKey && isFileSync) {
                     $('#ll_status_text').html('<span class="text-warning">Track changed — re-syncing...</span>');
                     // Reset drift tracking for new track
                     llPlayer.streamStartElapsed = null;
