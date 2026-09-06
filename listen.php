@@ -195,13 +195,13 @@ var llExact = {
                 llExact.startAudioTime = 0;
                 llExact.startLatency = 1.3;
             }
-            llExact.pollTimer = setInterval(llExact.poll, 100);
+            llExact.pollTimer = setInterval(llExact.poll, 200);
         }, error:function(){
             llExact.startWall = Date.now();
             llExact.startElapsed = 0;
             llExact.startAudioTime = llPlayer.audio ? llPlayer.audio.currentTime : 0;
-            llExact.startLatency = 0;
-            llExact.pollTimer = setInterval(llExact.poll, 100);
+            llExact.startLatency = 1.3;
+            llExact.pollTimer = setInterval(llExact.poll, 200);
         }});
     },
     stop: function() {
@@ -255,32 +255,28 @@ var llExact = {
                 var drift = actual - expectedAudioTime;
                 llExact.drift = drift;
 
-                // <250ms target: gentle nudge, not choppy. 40ms dead zone, 50-250ms small nudge, >250ms larger but still <3%
                 var absDrift = Math.abs(drift);
                 var rate = 1.0;
-                // Hysteresis: require 2 consecutive polls beyond threshold before nudging to avoid jitter
-                llExact._driftHits = (absDrift > 0.05) ? (llExact._driftHits||0)+1 : 0;
-                if (llExact._driftHits >= 2 && absDrift > 0.05) {
+                llExact._driftHits = (absDrift > 0.08) ? (llExact._driftHits||0)+1 : 0;
+                if (llExact._driftHits >= 3 && absDrift > 0.08) {
                     if (drift > 0) {
-                        rate = absDrift > 0.25 ? 0.97 : 0.985;
+                        rate = absDrift > 0.5 ? 0.98 : 0.992;
                     } else {
-                        rate = absDrift > 0.25 ? 1.03 : 1.015;
+                        rate = absDrift > 0.5 ? 1.02 : 1.008;
                     }
                     try { llPlayer.audio.playbackRate = rate; } catch(e) {}
                     llExact.corrections++;
-                    if (llExact.corrections % 5 === 0) console.log('exact drift',drift.toFixed(3),'→ rate',rate,'media',d.media);
+                    if (llExact.corrections % 8 === 0) console.log('exact drift',drift.toFixed(3),'→ rate',rate,'media',d.media);
                     $('#ll_exact_status').text('exact • drift '+drift.toFixed(2)+'s → '+rate.toFixed(2)+'x');
-                } else if (absDrift <= 0.05) {
-                    try { if (llPlayer.audio.playbackRate !== 1.0) llPlayer.audio.playbackRate = 1.0; } catch(e) {}
+                } else if (absDrift <= 0.08) {
+                    try { if (Math.abs(llPlayer.audio.playbackRate - 1.0) > 0.001) llPlayer.audio.playbackRate = 1.0; } catch(e) {}
                     $('#ll_exact_status').text('exact • locked '+drift.toFixed(2)+'s');
-                    llExact._driftHits = 0;
+                    if (absDrift < 0.03) llExact._driftHits = 0;
                 } else {
-                    // within hysteresis window, keep current rate
                     $('#ll_exact_status').text('exact • drift '+drift.toFixed(2)+'s');
                 }
 
-                // Hard resync only if >1s and corrected 5 times — avoids broken audio from large jumps
-                if (absDrift > 1.0 && llExact.corrections > 5) {
+                if (absDrift > 2.5 && llExact.corrections > 8) {
                     console.log('exact hard resync', drift);
                     $('#ll_exact_status').text('exact • hard resync');
                     llExact.corrections = 0;
