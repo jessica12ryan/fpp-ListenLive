@@ -1158,9 +1158,7 @@ function llStreamFileSync($isExplicitFileMode) {
             ignore_user_abort(true);
             @ini_set('zlib.output_compression', '0');
             ob_implicit_flush(1);
-            // Exact mode (?exact=1) seeks to exact frame, not behind, for <250ms lock
-            $latency = !empty($_GET['exact']) ? 0.0 : LLSyncTiming::SEEK_LATENCY_S;
-            $seekPos = LLSyncTiming::seekPosition($elapsed, $latency);
+            $seekPos = LLSyncTiming::seekPosition($elapsed, LLSyncTiming::SEEK_LATENCY_S);
             // For gapless, stream only remaining duration (duration - elapsed) if known, else stream to EOF
             $duration = 0;
             if (isset($fallback['bgStatus']['trackDuration']) && is_numeric($fallback['bgStatus']['trackDuration'])) $duration = (float)$fallback['bgStatus']['trackDuration'];
@@ -1187,8 +1185,7 @@ function llStreamFileSync($isExplicitFileMode) {
                         $path = $nextFallback['path'];
                         $elapsed = (float)($nextFallback['elapsed'] ?? 0);
                         llLog('Stream file sync seamless to next track: ' . $path . ' elapsed=' . $elapsed);
-                        $seekLatency2 = !empty($_GET['exact']) ? 0.0 : LLSyncTiming::SEEK_LATENCY_SEAMLESS_S;
-                        $seekPos = LLSyncTiming::seekPosition($elapsed, $seekLatency2);
+                        $seekPos = LLSyncTiming::seekPosition($elapsed, LLSyncTiming::SEEK_LATENCY_SEAMLESS_S);
                         $cmd2 = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)$seekPos) . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -write_xing 0 -id3v2_version 0 -f mp3 -flush_packets 1 -';
                         $handle2 = @popen($cmd2 . ' 2>/dev/null', 'r');
                         if ($handle2) {
@@ -1215,8 +1212,7 @@ function llStreamFileSync($isExplicitFileMode) {
         if (isset($mimeMap[$ext])) $mime = $mimeMap[$ext];
         // For mp3, try byte offset seek (less accurate, fallback) — via Timing helper
         if ($ext === 'mp3' && $elapsed > 1) {
-            $lat = !empty($_GET['exact']) ? 0.0 : LLSyncTiming::SEEK_LATENCY_S;
-            $offset = LLSyncTiming::byteOffset($elapsed, $lat, LLSyncTiming::BYTES_PER_SEC_128K);
+            $offset = LLSyncTiming::byteOffset($elapsed, LLSyncTiming::SEEK_LATENCY_S, LLSyncTiming::BYTES_PER_SEC_128K);
             $size = filesize($path);
             if ($offset < $size) {
                 header('Content-Type: audio/mpeg');

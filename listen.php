@@ -188,12 +188,12 @@ var llExact = {
                 llExact.startWall = (d.wall_ms || d.server_wall_ms || Date.now());
                 llExact.startElapsed = d.extrapolated_seconds;
                 llExact.startAudioTime = llPlayer.audio ? llPlayer.audio.currentTime : 0;
-                llExact.startLatency = 0; // exact: server seeks to 0 offset (?exact=1), so no latency
+                llExact.startLatency = 1.3;
             } else {
                 llExact.startWall = Date.now();
                 llExact.startElapsed = 0;
                 llExact.startAudioTime = 0;
-                llExact.startLatency = 0;
+                llExact.startLatency = 1.3;
             }
             llExact.pollTimer = setInterval(llExact.poll, 100);
         }, error:function(){
@@ -235,10 +235,8 @@ var llExact = {
                 var isFileSync = d.media && d.media.indexOf('.mp3') !== -1;
                 var expectedAudioTime;
                 if (isFileSync && llExact.startElapsed !== null) {
-                    // File-sync stream was seeked to startElapsed - latency, so audio 0 = startElapsed - latency
-                    // To be frame-exact (media time = server time), audio should be at extrapolated - (startElapsed - latency)
-                    var latency = llExact.startLatency || 1.3;
-                    expectedAudioTime = (extrapolated - llExact.startElapsed) + (llExact.startAudioTime || 0) + latency;
+                    // Native gapless is 1.3s behind server (seek), so stay there — don't chase 0
+                    expectedAudioTime = (extrapolated - llExact.startElapsed) + (llExact.startAudioTime || 0);
                 } else {
                     // Live: just compare wall vs audio progress — keep at 1.0 unless buffering
                     expectedAudioTime = extrapolated;
@@ -319,8 +317,8 @@ var llPlayer = {
     lastMediaAnnouncedAtMono: null,
     lastElapsedHalf: null,
     lastSendErrorCount: 0,
-    // Append cache buster + exact flag for frame-exact seek (no 1.3s behind)
-    buildUrl: function() { return llPlayer.streamUrl + '?t=' + Date.now() + (llExact.useExact ? '&exact=1' : ''); },
+    // Append cache buster to force reconnect without browser cache
+    buildUrl: function() { return llPlayer.streamUrl + '?t=' + Date.now(); },
 
     init: function() {
         llPlayer.audio = document.getElementById('ll_audio');
