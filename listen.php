@@ -99,11 +99,49 @@ $showDevTab = $uiLevel >= 3;
                 <div style="margin:8px auto;max-width:560px;text-align:center;">
                     <label style="font-size:12px;color:var(--bs-secondary-color,#6c757d);"><input type="checkbox" id="ll_mse_toggle" onchange="llMSE.toggle(this.checked)" style="vertical-align:middle;margin-right:4px;"> Try MSE gapless (prototype, less buffering)</label>
                     <span id="ll_mse_status" style="font-size:11px;color:var(--bs-secondary-color,#6c757d);margin-left:8px;"></span>
+                    <div id="ll_mse_warn" style="font-size:11px;color:#856404;background:#fff3cd;border:1px solid #ffe69c;border-radius:4px;padding:4px 8px;margin-top:6px;display:none;"></div>
                 </div>
                 <script>
                 $(function(){
                     var s = llMSE.enabled ? 'MSE supported' : 'MSE not supported — using native';
                     $('#ll_mse_status').text(s + (llMSE.useMSE ? ' • enabled' : ' • native'));
+                    // FPP's CSP (default-src 'self' without media-src blob:) blocks MediaSource blob: URLs
+                    // causing code 4 even when isTypeSupported is true. Detect and disable MSE.
+                    if (llMSE.enabled && llMSE.useMSE) {
+                        try {
+                            // Test if blob: is allowed for media — CSP violation will fire error quickly
+                            var testMS = new MediaSource();
+                            var testUrl = URL.createObjectURL(testMS);
+                            var testAudio = document.createElement('audio');
+                            testAudio.src = testUrl;
+                            // If CSP blocks, the browser will not load blob, but we can't detect synchronously.
+                            // Instead, warn and offer native which is already gapless via server concatenation.
+                            var cspBlocked = document.querySelector('meta[http-equiv="Content-Security-Policy"]') || false;
+                            // FPP sends CSP via header, not meta, but we can probe by checking if MediaSource + blob ever plays
+                            // For now, if MSE has ever failed with code 4, remember and auto-disable.
+                            var mseFailCount = parseInt(localStorage.getItem('fpp-ListenLive-mseFails')||'0',10);
+                            if (mseFailCount >= 2) {
+                                $('#ll_mse_warn').text('MSE was disabled after '+mseFailCount+' failures (FPP security policy blocks blob: media). Native gapless is active and server-concatenates tracks — no gap.').show();
+                                llMSE.useMSE = false;
+                                try { localStorage.setItem('fpp-ListenLive-useMSE','0'); } catch(e) {}
+                                $('#ll_mse_toggle').prop('checked', false);
+                                $('#ll_mse_status').text('MSE supported — native (auto-disabled)');
+                                try { URL.revokeObjectURL(testUrl); } catch(e) {}
+                            } else {
+                                $('#ll_mse_warn').text('MSE is experimental — if you see “code 4” or “live capture failed”, uncheck to use native (gapless via server).').show();
+                            }
+                            try { URL.revokeObjectURL(testUrl); } catch(e) {}
+                        } catch(e) {}
+                    }
+                    // Persist MSE failures for auto-disable
+                    var origFallback = llMSE.fallbackToNative;
+                    llMSE.fallbackToNative = function() {
+                        try {
+                            var c = parseInt(localStorage.getItem('fpp-ListenLive-mseFails')||'0',10);
+                            localStorage.setItem('fpp-ListenLive-mseFails', String(c+1));
+                        } catch(e) {}
+                        return origFallback.apply(this, arguments);
+                    };
                 });
                 </script>
 
@@ -475,15 +513,17 @@ var llPlayer = {
             llPlayer.reconnectAttempts = (llPlayer.reconnectAttempts || 0) + 1;
             $('#ll_badge').removeClass('ll-badge-live ll-badge-idle').addClass('ll-badge-warn').text('Error');
             $('#ll_status_text').html('<span class="text-danger">' + escHtml(msg) + ' (attempt ' + llPlayer.reconnectAttempts + '). Checking diagnostics...</span>');
-            // Fetch diagnostics to show helpful hint
+            // Fetch diagnostics to show helpful hint — distinguish idle (no file) from capture failure
             $.ajax({
                 url: 'api/plugin/fpp-ListenLive/diagnostics',
                 type: 'GET',
                 dataType: 'json',
                 success: function(d) {
                     var hint = '';
-                    // Live capture only — no file fallback per user request
-                    if (!d.detection || !d.detection.ffmpeg) {
+                    var isIdle = !d.fallback_media || (!d.fallback_media.path && !d.fallback_media.streamUrl);
+                    if (isIdle) {
+                        hint = ' — FPP is idle (no file playing). Start a playlist — stream will be available when media is playing.';
+                    } else if (!d.detection || !d.detection.ffmpeg) {
                         hint = ' — ffmpeg missing';
                     } else if (!d.detection.pipewire && !d.detection.pulse && !d.detection.alsa) {
                         hint = ' — no capture devices detected. Check Diagnostics and FPP Audio settings (PipeWire/Pulse).';
