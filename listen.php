@@ -482,29 +482,53 @@ var llPlayer = {
                 } else {
                     var elapsed = s.seconds_elapsed || s.time_elapsed || np.seconds_elapsed || 0;
                     var remaining = s.seconds_remaining || s.time_remaining || '';
-                    // For background/after-hours, use direct background status for display (live capture should include it)
+                    var durationForBar = 0;
+                    // For background/after-hours, use direct background status for display
                     if (isBackgroundPlaying) {
-                        if (d.background_status && typeof d.background_status.trackElapsed === 'number' && d.background_status.trackElapsed > 0) {
-                            elapsed = d.background_status.trackElapsed;
-                        } else if (d.fallback_media && typeof d.fallback_media.elapsed === 'number' && d.fallback_media.elapsed > 0) {
-                            elapsed = d.fallback_media.elapsed;
-                        } else if (d.background_status && typeof d.background_status.trackElapsed === 'number') {
+                        if (d.background_status && typeof d.background_status.trackElapsed === 'number') {
                             elapsed = d.background_status.trackElapsed;
                             if (typeof d.background_status.trackDuration === 'number' && d.background_status.trackDuration > 0) {
-                                remaining = Math.max(0, d.background_status.trackDuration - elapsed);
+                                durationForBar = d.background_status.trackDuration;
+                                remaining = Math.max(0, durationForBar - elapsed);
+                            }
+                        } else if (d.fallback_media && typeof d.fallback_media.elapsed === 'number' && d.fallback_media.elapsed > 0) {
+                            elapsed = d.fallback_media.elapsed;
+                            if (typeof d.fallback_media.duration === 'number' && d.fallback_media.duration > 0) {
+                                durationForBar = d.fallback_media.duration;
+                                remaining = Math.max(0, durationForBar - elapsed);
                             }
                         }
-                        // Multisync: if background is via FPP playlist, elapsed is already multisync-aware
+                    } else {
+                        // For FPP, try to get duration from fallback or status
+                        if (typeof s.seconds_remaining === 'number' && typeof s.seconds_elapsed === 'number') {
+                            durationForBar = s.seconds_elapsed + s.seconds_remaining;
+                        }
                     }
                     $('#ll_nowplaying').text(media);
                     $('#ll_elapsed').text((elapsed || '0') + (remaining ? ' / ' + remaining : ''));
-                    // Update custom timing bar + Media Session only when playing (per user request)
+                    // Update custom timing bar + Media Session only when playing
+                    // Use audio.currentTime for live-accurate elapsed when available, fallback to status
+                    var displayElapsed = elapsed;
+                    var displayDuration = durationForBar;
+                    if (llPlayer.isPlaying && llPlayer.audio && !llPlayer.audio.paused && llPlayer.audio.readyState >= 2 && llPlayer.streamStartElapsed !== null) {
+                        // For file-sync, audio.currentTime is time since stream start (seekPos), so real elapsed = streamStartElapsed + currentTime
+                        // For live, audio.currentTime is just time since play, but status elapsed is more accurate for display
+                        // Use status elapsed directly, but correct for 1.3s seek offset
+                        if (isBackgroundPlaying || s.current_song) {
+                            // File-sync: status elapsed is authoritative, but account for seek offset
+                            // Server seeks to elapsed-1.3, so client hears elapsed-1.3 at start, then progresses with audio clock
+                            // For display, just use status elapsed (already multisync-aware)
+                            displayElapsed = elapsed;
+                        }
+                    }
                     if (llPlayer.isPlaying) {
-                        var duNum = 0;
-                        if (isBackgroundPlaying && d.background_status && typeof d.background_status.trackDuration === 'number') duNum = d.background_status.trackDuration;
-                        else if (typeof s.seconds_remaining === 'number' && typeof s.seconds_elapsed === 'number') duNum = s.seconds_elapsed + s.seconds_remaining;
-                        else if (remaining && !isNaN(parseInt(remaining))) duNum = parseInt(elapsed) + parseInt(remaining);
-                        llPlayer.updateTiming(parseInt(elapsed)||0, duNum, media);
+                        var duNum = displayDuration;
+                        if (!duNum) {
+                            if (isBackgroundPlaying && d.background_status && typeof d.background_status.trackDuration === 'number') duNum = d.background_status.trackDuration;
+                            else if (typeof s.seconds_remaining === 'number' && typeof s.seconds_elapsed === 'number') duNum = s.seconds_elapsed + s.seconds_remaining;
+                            else if (remaining && !isNaN(parseInt(remaining))) duNum = parseInt(displayElapsed) + parseInt(remaining);
+                        }
+                        llPlayer.updateTiming(parseInt(displayElapsed)||0, duNum, media);
                     } else {
                         $('#ll_timing').hide();
                         if ('mediaSession' in navigator) {
@@ -517,11 +541,16 @@ var llPlayer = {
                     }
                 }
                 // Also show background status in playlist/sequence when idle
-                var bgPlaylist = (d.background_status && (d.background_status.playlist || d.background_status.backgroundMusicPlaylist)) || '';
-                if (!s.current_playlist && bgPlaylist) {
+                var bgPlaylist = (d.background_status && (d.background_status.playlist || d.background_status.backgroundMusicPlaylist || d.background_status.currentTrack)) || '';
+                // Handle s.current_playlist being object like {"playlist":"Ghostbusters...","count":"1"} vs string
+                var curPlaylistStr = '';
+                if (typeof s.current_playlist === 'string') curPlaylistStr = s.current_playlist;
+                else if (s.current_playlist && typeof s.current_playlist === 'object' && s.current_playlist.playlist) curPlaylistStr = s.current_playlist.playlist;
+                else if (np.current_playlist && typeof np.current_playlist === 'string') curPlaylistStr = np.current_playlist;
+                if (!curPlaylistStr && bgPlaylist) {
                     $('#ll_playlist').text(bgPlaylist + ' (BackgroundMusic)');
                 } else {
-                    $('#ll_playlist').text(s.current_playlist || np.current_playlist || (fppdReachable ? '—' : '— (FPPD not reachable)'));
+                    $('#ll_playlist').text(curPlaylistStr || (fppdReachable ? '—' : '— (FPPD not reachable)'));
                 }
                 if (!s.current_sequence && isBackgroundPlaying) {
                     $('#ll_sequence').text('— (background active)');
