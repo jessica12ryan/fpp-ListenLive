@@ -96,6 +96,16 @@ $showDevTab = $uiLevel >= 3;
                     <span id="ll_vol_label">80%</span>
                     <input type="button" class="buttons" style="padding:4px 10px; margin-left:8px;" value="Mute" id="ll_mute_btn" onclick="llPlayer.toggleMute();">
                 </div>
+                <div style="margin:8px auto;max-width:560px;text-align:center;">
+                    <label style="font-size:12px;color:var(--bs-secondary-color,#6c757d);"><input type="checkbox" id="ll_mse_toggle" onchange="llMSE.toggle(this.checked)" style="vertical-align:middle;margin-right:4px;"> Try MSE gapless (prototype, less buffering)</label>
+                    <span id="ll_mse_status" style="font-size:11px;color:var(--bs-secondary-color,#6c757d);margin-left:8px;"></span>
+                </div>
+                <script>
+                $(function(){
+                    var s = llMSE.enabled ? 'MSE supported' : 'MSE not supported — using native';
+                    $('#ll_mse_status').text(s + (llMSE.useMSE ? ' • enabled' : ' • native'));
+                });
+                </script>
 
                 <div class="ll-status-grid" id="ll_details">
                     <b>Source:</b> <span id="ll_src">—</span>
@@ -122,6 +132,115 @@ $showDevTab = $uiLevel >= 3;
 </div>
 
 <script>
+// MSE prototype for gapless, low-buffer live — falls back to native <audio> if unsupported
+var llMSE = {
+    enabled: !!(window.MediaSource && window.MediaSource.isTypeSupported && window.MediaSource.isTypeSupported('audio/mpeg')),
+    mediaSource: null,
+    sourceBuffer: null,
+    audio: null,
+    fetching: false,
+    controller: null,
+    useMSE: false, // toggled via localStorage, default off for now (prototype)
+    init: function(audioEl) {
+        llMSE.audio = audioEl;
+        try { var v = localStorage.getItem('fpp-ListenLive-useMSE'); if (v !== null) llMSE.useMSE = v === '1'; } catch(e) {}
+        if (llMSE.useMSE && !llMSE.enabled) llMSE.useMSE = false;
+        $('#ll_mse_toggle').prop('checked', llMSE.useMSE);
+        if (!llMSE.useMSE || !llMSE.enabled) return false;
+        // Switch audio to MSE
+        try {
+            llMSE.mediaSource = new MediaSource();
+            audioEl.src = URL.createObjectURL(llMSE.mediaSource);
+            llMSE.mediaSource.addEventListener('sourceopen', function() {
+                try {
+                    llMSE.sourceBuffer = llMSE.mediaSource.addSourceBuffer('audio/mpeg');
+                    llMSE.sourceBuffer.mode = 'sequence';
+                    llMSE.sourceBuffer.addEventListener('updateend', function() {
+                        if (llMSE.audio.paused && llMSE.audio.readyState >= 2) {
+                            var p = llMSE.audio.play();
+                            if (p && p.catch) p.catch(function(){});
+                        }
+                    });
+                } catch(e) { console.warn('MSE SourceBuffer failed', e); llMSE.fallbackToNative(); }
+            });
+            return true;
+        } catch(e) { console.warn('MSE init failed', e); llMSE.fallbackToNative(); return false; }
+    },
+    fallbackToNative: function() {
+        llMSE.useMSE = false;
+        try { localStorage.setItem('fpp-ListenLive-useMSE', '0'); } catch(e) {}
+        $('#ll_mse_toggle').prop('checked', false);
+        if (llMSE.mediaSource) { try { URL.revokeObjectURL(llMSE.audio.src); } catch(e) {} }
+        llMSE.mediaSource = null; llMSE.sourceBuffer = null;
+        // Restore native src if needed
+        if (llPlayer.isPlaying) {
+            llPlayer.audio.pause();
+            llPlayer.audio.removeAttribute('src');
+            llPlayer.audio.load();
+            llPlayer.audio.src = llPlayer.buildUrl();
+            llPlayer.audio.load();
+            var p = llPlayer.audio.play(); if (p && p.catch) p.catch(function(){});
+        }
+    },
+    toggle: function(enabled) {
+        llMSE.useMSE = !!enabled;
+        try { localStorage.setItem('fpp-ListenLive-useMSE', llMSE.useMSE ? '1' : '0'); } catch(e) {}
+        location.reload();
+    },
+    fetchAndAppend: function(url) {
+        if (!llMSE.useMSE || !llMSE.sourceBuffer) return false;
+        if (llMSE.fetching) { try { llMSE.controller.abort(); } catch(e) {} }
+        llMSE.fetching = true;
+        llMSE.controller = new AbortController();
+        fetch(url, {signal: llMSE.controller.signal, cache: 'no-store'}).then(function(resp) {
+            if (!resp.ok || !resp.body) throw new Error('fetch failed ' + resp.status);
+            var reader = resp.body.getReader();
+            function pump() {
+                return reader.read().then(function(result) {
+                    if (result.done) { llMSE.fetching = false; return; }
+                    var chunk = result.value;
+                    // Append to SourceBuffer, queue if updating
+                    function doAppend() {
+                        try {
+                            if (llMSE.sourceBuffer.updating) {
+                                setTimeout(doAppend, 20);
+                            } else {
+                                // Keep buffer from growing unbounded (live) — trim to last 30s
+                                if (llMSE.audio.buffered.length > 0) {
+                                    var start = llMSE.audio.buffered.start(0);
+                                    var end = llMSE.audio.buffered.end(llMSE.audio.buffered.length - 1);
+                                    if (end - start > 30 && llMSE.sourceBuffer.buffered.length > 0) {
+                                        try { llMSE.sourceBuffer.remove(start, end - 20); } catch(e) {}
+                                    }
+                                }
+                                llMSE.sourceBuffer.appendBuffer(chunk);
+                            }
+                        } catch(e) { console.warn('append failed', e); }
+                    }
+                    doAppend();
+                    // Continue pumping without blocking UI
+                    setTimeout(pump, 0);
+                });
+            }
+            return pump();
+        }).catch(function(e) {
+            if (e.name !== 'AbortError') console.warn('MSE fetch error', e);
+            llMSE.fetching = false;
+            if (llPlayer.isPlaying && llMSE.useMSE) {
+                setTimeout(function(){ if (llPlayer.isPlaying) llMSE.fetchAndAppend(llPlayer.buildUrl()); }, 1200);
+            }
+        });
+        return true;
+    },
+    stop: function() {
+        llMSE.fetching = false;
+        if (llMSE.controller) { try { llMSE.controller.abort(); } catch(e) {} llMSE.controller = null; }
+        if (llMSE.sourceBuffer) {
+            try { if (llMSE.sourceBuffer.updating) llMSE.sourceBuffer.abort(); } catch(e) {}
+        }
+    }
+};
+
 var llPlayer = {
     audio: null,
     isPlaying: false,
@@ -156,6 +275,8 @@ var llPlayer = {
         } else {
             llPlayer.audio.volume = 0.8;
         }
+        // Init MSE prototype (gapless, low-buffer) — falls back to native if unsupported
+        try { llMSE.init(llPlayer.audio); } catch(e) { console.warn('MSE init error', e); }
         llPlayer.audio.addEventListener('playing', function() {
             llPlayer.isPlaying = true;
             llPlayer.reconnectAttempts = 0;
@@ -316,6 +437,25 @@ var llPlayer = {
 
     play: function() {
         var a = llPlayer.audio;
+        // MSE path: fetch via MediaSource instead of setting src directly
+        if (llMSE.useMSE && llMSE.sourceBuffer) {
+            llMSE.fetchAndAppend(llPlayer.buildUrl());
+            llPlayer.initialConnect = true;
+            clearTimeout(llPlayer.initialConnectTimer);
+            llPlayer.initialConnectTimer = setTimeout(function(){ llPlayer.initialConnect = false; }, 5000);
+            llPlayer.isPlaying = true;
+            $('#ll_status_text').html('<span class="text-success">Connecting (MSE)...</span>');
+            // Trigger play after a bit of buffering
+            setTimeout(function(){
+                if (llMSE.audio.readyState >= 1) {
+                    var p2 = llMSE.audio.play();
+                    if (p2 && p2.catch) p2.catch(function(e){
+                        $('#ll_status_text').html('<span class="text-danger">Playback blocked: ' + e.message + ' — click Play again.</span>');
+                    });
+                }
+            }, 400);
+            return;
+        }
         if (!a.src || a.src === window.location.href) {
             a.src = llPlayer.buildUrl();
             a.load();
@@ -335,6 +475,7 @@ var llPlayer = {
     },
 
     pause: function() {
+        llMSE.stop();
         llPlayer.audio.pause();
         llPlayer.isPlaying = false;
         llPlayer.trackChangePending = false;
@@ -344,9 +485,15 @@ var llPlayer = {
     },
 
     stop: function() {
+        llMSE.stop();
         llPlayer.audio.pause();
-        llPlayer.audio.removeAttribute('src');
-        llPlayer.audio.load();
+        try { llPlayer.audio.removeAttribute('src'); } catch(e) {}
+        try { llPlayer.audio.load(); } catch(e) {}
+        // If MSE was used, revoke and re-init on next play
+        if (llMSE.useMSE && llMSE.mediaSource) {
+            try { URL.revokeObjectURL(llPlayer.audio.src); } catch(e) {}
+            llMSE.mediaSource = null; llMSE.sourceBuffer = null;
+        }
         llPlayer.isPlaying = false;
         llPlayer.trackChangePending = false;
         clearTimeout(llPlayer.trackChangeTimeout);
@@ -362,6 +509,14 @@ var llPlayer = {
     },
 
     reconnect: function() {
+        if (llMSE.useMSE && llMSE.sourceBuffer) {
+            llMSE.stop();
+            // For MSE, just fetch new URL and append (gapless, no src reset)
+            llMSE.fetchAndAppend(llPlayer.buildUrl());
+            $('#ll_status_text').html('<span class="text-warning">Re-syncing (MSE)...</span>');
+            llPlayer.isPlaying = true;
+            return;
+        }
         llPlayer.audio.pause();
         llPlayer.audio.src = llPlayer.buildUrl();
         llPlayer.audio.load();
