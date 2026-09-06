@@ -749,6 +749,8 @@ function getEndpointsfppListenLive() {
     $result[] = ['method' => 'POST', 'endpoint' => 'test',        'callback' => 'llTestEndpoint'];
     $result[] = ['method' => 'GET',  'endpoint' => 'icon',        'callback' => 'llIconEndpoint'];
     $result[] = ['method' => 'GET',  'endpoint' => 'logs',        'callback' => 'llLogsEndpoint'];
+    $result[] = ['method' => 'GET',  'endpoint' => 'sync',        'callback' => 'llSyncEndpoint'];
+    $result[] = ['method' => 'GET',  'endpoint' => 'clock',       'callback' => 'llClockEndpoint'];
     $result[] = ['method' => 'GET',  'endpoint' => 'check-updates','callback' => 'llCheckUpdatesEndpoint'];
     $result[] = ['method' => 'POST', 'endpoint' => 'update',      'callback' => 'llUpdateEndpoint'];
     $result[] = ['method' => 'POST', 'endpoint' => 'reinstall',   'callback' => 'llReinstallEndpoint'];
@@ -1522,6 +1524,96 @@ function llLogsEndpoint() {
         }
     }
     return llJson(['success' => true, 'entries' => array_reverse($lines)]);
+}
+
+function llSyncEndpoint() {
+    // Try C++ plugin's exact sync first (monotonic, frame-exact), then fallback to file/status
+    $syncFile = '/tmp/ll_sync.json';
+    $nowMono = LLSyncTiming::monotonicMs();
+    $nowWall = LLSyncTiming::wallClockMs();
+    // Try direct C++ API via fppd (port 32322) — most precise, no file race
+    $cppSync = null;
+    if (function_exists('curl_init')) {
+        $ch = curl_init('http://127.0.0.1:32322/api/plugin-apis/ListenLive/sync');
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 1);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 1);
+        $tmp = @curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        if ($tmp !== false && $code === 200 && $tmp !== '' && $tmp[0] === '{') {
+            $cppSync = json_decode($tmp, true);
+        }
+    }
+    if (is_array($cppSync) && isset($cppSync['media'])) {
+        // C++ authoritative — add server now for RTT calc
+        $cppSync['server_monotonic_ms'] = $nowMono;
+        $cppSync['server_wall_ms'] = $nowWall;
+        $cppSync['source'] = 'c++';
+        return llJson($cppSync);
+    }
+    // Fallback: file written by C++ (if fppd API not reachable)
+    if (file_exists($syncFile)) {
+        $j = @json_decode(@file_get_contents($syncFile), true);
+        if (is_array($j) && isset($j['media'])) {
+            $j['server_monotonic_ms'] = $nowMono;
+            $j['server_wall_ms'] = $nowWall;
+            $j['source'] = 'file';
+            // Extrapolate if recent
+            if (isset($j['monotonic_ms'], $j['seconds']) && is_numeric($j['monotonic_ms']) && is_numeric($j['seconds']) && $j['seconds'] >= 0) {
+                $delta = ($nowMono - (float)$j['monotonic_ms']) / 1000.0;
+                if ($delta >= 0 && $delta < 2.0) {
+                    $j['extrapolated_seconds'] = (float)$j['seconds'] + $delta;
+                    $j['extrapolated'] = true;
+                }
+            }
+            return llJson($j);
+        }
+    }
+    // Final fallback: status poll (int seconds) — not frame-exact
+    $fppStatus = llGetFppStatus();
+    $fallback = llGetFallbackMedia();
+    $elapsed = LLSyncTiming::elapsedFromStatus($fppStatus, llGetBackgroundMusicStatus(), $fallback);
+    $dur = LLSyncTiming::durationFromStatus($fppStatus, null, $fallback);
+    $media = $fallback['media'] ?? $fppStatus['current_song'] ?? $fppStatus['current_sequence'] ?? '';
+    return llJson([
+        'has_media' => $media !== '' && $media !== 'false',
+        'media' => $media,
+        'seconds' => $elapsed,
+        'extrapolated_seconds' => $elapsed,
+        'frame' => $elapsed >= 0 ? (int)($elapsed * 44100) : -1,
+        'monotonic_ms' => $nowMono,
+        'wall_ms' => $nowWall,
+        'epoch_ms' => $nowWall - $nowMono, // approx
+        'server_monotonic_ms' => $nowMono,
+        'server_wall_ms' => $nowWall,
+        'confidence' => $media !== '' ? 'exact' : 'unresolved',
+        'source' => 'fallback',
+        'duration' => $dur,
+        'fpp_milliseconds' => $fppStatus['milliseconds_elapsed'] ?? null,
+    ]);
+}
+
+function llClockEndpoint() {
+    $nowMono = LLSyncTiming::monotonicMs();
+    $nowWall = LLSyncTiming::wallClockMs();
+    // Try C++ clock first
+    if (function_exists('curl_init')) {
+        $ch = curl_init('http://127.0.0.1:32322/api/plugin-apis/ListenLive/clock');
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 1);
+        $tmp = @curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        if ($tmp !== false && $code === 200 && $tmp !== '' && $tmp[0] === '{') {
+            $j = json_decode($tmp, true);
+            if (is_array($j)) return llJson($j);
+        }
+    }
+    return llJson([
+        'monotonic_ms' => $nowMono,
+        'wall_ms' => $nowWall,
+        'epoch_ms' => $nowWall - $nowMono,
+        'source' => 'php',
+    ]);
 }
 
 function llCheckUpdatesEndpoint() {

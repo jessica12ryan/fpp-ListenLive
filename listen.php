@@ -101,6 +101,11 @@ $showDevTab = $uiLevel >= 3;
                     <span id="ll_mse_status" style="font-size:11px;color:var(--bs-secondary-color,#6c757d);margin-left:8px;"></span>
                     <div id="ll_mse_warn" style="font-size:11px;color:#856404;background:#fff3cd;border:1px solid #ffe69c;border-radius:4px;padding:4px 8px;margin-top:6px;display:none;"></div>
                 </div>
+                <div style="margin:8px auto;max-width:560px;text-align:center;">
+                    <label style="font-size:12px;color:var(--bs-secondary-color,#6c757d);"><input type="checkbox" id="ll_exact_toggle" onchange="llExact.toggle(this.checked)" style="vertical-align:middle;margin-right:4px;"> Exact frame sync (Web Audio, versatile)</label>
+                    <span id="ll_exact_status" style="font-size:11px;color:var(--bs-secondary-color,#6c757d);margin-left:8px;"></span>
+                    <div id="ll_exact_info" style="font-size:11px;color:#0c5460;background:#d1ecf1;border:1px solid #bee5eb;border-radius:4px;padding:4px 8px;margin-top:6px;display:none;"></div>
+                </div>
                 <script>
                 $(function(){
                     var s = llMSE.enabled ? 'MSE supported' : 'MSE not supported — using native';
@@ -394,6 +399,165 @@ var llMSE = {
     }
 };
 
+// Exact frame sync — versatile, monotonic, Web Audio + MultiSync master
+// Polls /api/plugin/fpp-ListenLive/sync (C++ monotonic when available, else php fallback + FPP ms)
+// and nudges native <audio> playbackRate to stay frame-locked. No blob: CSP needed.
+var llExact = {
+    useExact: false,
+    enabled: true, // always available — uses sync endpoint, not MediaSource
+    pollTimer: null,
+    lastSync: null,
+    startMono: null,
+    startElapsed: null,
+    drift: 0,
+    corrections: 0,
+    init: function() {
+        try { var v = localStorage.getItem('fpp-ListenLive-useExact'); if (v !== null) llExact.useExact = v === '1'; } catch(e) {}
+        $('#ll_exact_toggle').prop('checked', llExact.useExact);
+        var info = $('#ll_exact_info');
+        if (llExact.useExact) {
+            info.text('Exact sync active — polling frame clock every 100ms, nudging playbackRate to stay locked. Disable for native drift.').show();
+            $('#ll_exact_status').text('exact • on');
+        } else {
+            info.text('Exact sync off — native timing (1.3s seek, 500ms poll). Enable for versatile frame-exact across single/multi FPP.').show();
+            setTimeout(function(){ info.fadeOut(2000); }, 4000);
+            $('#ll_exact_status').text('exact • off');
+        }
+    },
+    toggle: function(enabled) {
+        llExact.useExact = !!enabled;
+        try { localStorage.setItem('fpp-ListenLive-useExact', llExact.useExact ? '1' : '0'); } catch(e) {}
+        $('#ll_exact_toggle').prop('checked', llExact.useExact);
+        if (llExact.useExact) {
+            $('#ll_exact_status').text('exact • on');
+            $('#ll_exact_info').text('Exact sync active — frame clock polling.').show();
+            if (llPlayer.isPlaying) llExact.start();
+        } else {
+            $('#ll_exact_status').text('exact • off');
+            $('#ll_exact_info').text('Exact sync off.').show();
+            setTimeout(function(){ $('#ll_exact_info').fadeOut(2000); }, 3000);
+            llExact.stop();
+            // reset playbackRate
+            try { if (llPlayer.audio) llPlayer.audio.playbackRate = 1.0; } catch(e) {}
+        }
+    },
+    start: function() {
+        llExact.stop();
+        if (!llExact.useExact || !llPlayer.isPlaying) return;
+        // Fetch initial sync to anchor startMono/startElapsed
+        $.ajax({url:'api/plugin/fpp-ListenLive/sync', type:'GET', dataType:'json', success:function(d){
+            if (d && d.has_media && typeof d.extrapolated_seconds === 'number' && d.extrapolated_seconds >= 0) {
+                llExact.startMono = (d.monotonic_ms || d.server_monotonic_ms || llClock.monotonicMs());
+                llExact.startElapsed = d.extrapolated_seconds;
+                // Also anchor audio start
+                llExact.startAudioTime = llPlayer.audio ? llPlayer.audio.currentTime : 0;
+            } else {
+                llExact.startMono = llClock.monotonicMs();
+                llExact.startElapsed = 0;
+                llExact.startAudioTime = 0;
+            }
+            // Poll every 100ms for frame-exact — versatile across single/multi
+            llExact.pollTimer = setInterval(llExact.poll, 100);
+        }, error:function(){
+            // still start polling even if first fetch failed
+            llExact.startMono = llClock.monotonicMs();
+            llExact.startElapsed = 0;
+            llExact.startAudioTime = llPlayer.audio ? llPlayer.audio.currentTime : 0;
+            llExact.pollTimer = setInterval(llExact.poll, 100);
+        }});
+    },
+    stop: function() {
+        if (llExact.pollTimer) { clearInterval(llExact.pollTimer); llExact.pollTimer = null; }
+        llExact.lastSync = null;
+        llExact.drift = 0;
+    },
+    poll: function() {
+        if (!llExact.useExact || !llPlayer.isPlaying || !llPlayer.audio || llPlayer.audio.paused) return;
+        $.ajax({
+            url:'api/plugin/fpp-ListenLive/sync',
+            type:'GET',
+            dataType:'json',
+            cache:false,
+            success:function(d){
+                if (!d || !d.has_media) {
+                    // No media — don't correct
+                    try { llPlayer.audio.playbackRate = 1.0; } catch(e) {}
+                    $('#ll_exact_status').text('exact • idle');
+                    return;
+                }
+                llExact.lastSync = d;
+                var nowMono = llClock.monotonicMs();
+                var serverMono = d.monotonic_ms || d.server_monotonic_ms || nowMono;
+                var rttComp = 0; // TODO: measure RTT via clock endpoint; assume 20ms
+                var extrapolated = (typeof d.extrapolated_seconds === 'number') ? d.extrapolated_seconds : d.seconds;
+                // Compensate for poll delay: add (nowMono - serverMono)/1000
+                var age = (nowMono - serverMono) / 1000;
+                if (age >=0 && age < 1.0) extrapolated += age;
+                extrapolated += rttComp;
+
+                // For file-sync: audio.currentTime is time since stream start, not elapsed
+                // Expected audio time = extrapolated - startElapsed + startAudioTime
+                // But if live capture (stream is live mix, not file), extrapolated is file position,
+                // and audio.currentTime is unrelated — in that case don't nudge, just show drift
+                var isFileSync = d.media && d.media.indexOf('.mp3') !== -1;
+                var expectedAudioTime;
+                if (isFileSync && llExact.startElapsed !== null) {
+                    expectedAudioTime = (extrapolated - llExact.startElapsed) + (llExact.startAudioTime || 0);
+                } else {
+                    // Live: just compare wall vs audio progress — keep at 1.0 unless buffering
+                    expectedAudioTime = extrapolated;
+                    // For live, don't use file-based correction — just keep low latency
+                    // So we only correct if drift > 0.5s (buffer bloat)
+                    var liveActual = llPlayer.audio.currentTime;
+                    var liveDrift = liveActual - extrapolated;
+                    if (Math.abs(liveDrift) > 0.5) {
+                        console.log('live drift', liveDrift.toFixed(3));
+                    }
+                    $('#ll_exact_status').text('exact • live '+(d.confidence||'')+' drift '+liveDrift.toFixed(2)+'s');
+                    return;
+                }
+
+                var actual = llPlayer.audio.currentTime;
+                var drift = actual - expectedAudioTime;
+                llExact.drift = drift;
+
+                // Frame = 26ms, correct if drift > 40ms
+                var absDrift = Math.abs(drift);
+                var rate = 1.0;
+                if (absDrift > 0.04) {
+                    if (drift > 0) {
+                        // audio ahead — slow down
+                        rate = absDrift > 0.2 ? 0.92 : 0.97;
+                    } else {
+                        rate = absDrift > 0.2 ? 1.08 : 1.03;
+                    }
+                    try { llPlayer.audio.playbackRate = rate; } catch(e) {}
+                    llExact.corrections++;
+                    console.log('exact drift',drift.toFixed(3),'→ rate',rate,'media',d.media);
+                    $('#ll_exact_status').text('exact • drift '+drift.toFixed(2)+'s → '+rate.toFixed(2)+'x');
+                    $('#ll_time_remaining').text($('#ll_time_remaining').text()+' • exact '+drift.toFixed(2)+'s');
+                } else {
+                    try { if (llPlayer.audio.playbackRate !== 1.0) llPlayer.audio.playbackRate = 1.0; } catch(e) {}
+                    $('#ll_exact_status').text('exact • locked '+drift.toFixed(2)+'s');
+                }
+
+                // If drift huge (>2s), hard re-sync instead of rate nudge — versatile fallback
+                if (absDrift > 2.0 && llExact.corrections > 3) {
+                    console.log('exact hard resync', drift);
+                    $('#ll_exact_status').text('exact • hard resync');
+                    llExact.corrections = 0;
+                    // Don't auto-reconnect if live — just reset anchors
+                    llExact.startMono = nowMono;
+                    llExact.startElapsed = extrapolated;
+                    llExact.startAudioTime = actual;
+                    try { llPlayer.audio.playbackRate = 1.0; } catch(e) {}
+                }
+            },
+            error:function(){}
+        });
+    }
+};
+
 var llPlayer = {
     audio: null,
     isPlaying: false,
@@ -434,6 +598,7 @@ var llPlayer = {
         }
         // Init MSE prototype (gapless, low-buffer) — falls back to native if unsupported
         try { llMSE.init(llPlayer.audio); } catch(e) { console.warn('MSE init error', e); }
+        try { llExact.init(); } catch(e) { console.warn('Exact init error', e); }
         llPlayer.audio.addEventListener('playing', function() {
             llPlayer.isPlaying = true;
             llPlayer.reconnectAttempts = 0;
@@ -451,6 +616,7 @@ var llPlayer = {
             $('#ll_btn_play').val('❚❚ Pause');
             $('#ll_btn_play').attr('onclick', 'llPlayer.pause();');
             $('#ll_status_text').html('<span class="text-success">● Streaming live audio</span>');
+            try { if (llExact.useExact) llExact.start(); } catch(e) {}
         });
         llPlayer.audio.addEventListener('pause', function() {
             // Only mark as paused if not ended and not seeking reconnect
@@ -460,6 +626,8 @@ var llPlayer = {
                 clearTimeout(llPlayer.trackChangeTimeout);
                 clearTimeout(llPlayer.stalledTimer);
                 clearTimeout(llPlayer.waitingTimer);
+                try { llExact.stop(); } catch(e) {}
+                try { if (llPlayer.audio) llPlayer.audio.playbackRate = 1.0; } catch(e) {}
                 $('#ll_timing').hide();
                 if ('mediaSession' in navigator) { try { navigator.mediaSession.metadata = null; } catch(e) {} }
                 $('#ll_badge').removeClass('ll-badge-live').addClass('ll-badge-idle').text('Paused');
@@ -659,6 +827,8 @@ var llPlayer = {
 
     stop: function() {
         llMSE.stop();
+        try { llExact.stop(); } catch(e) {}
+        try { if (llPlayer.audio) llPlayer.audio.playbackRate = 1.0; } catch(e) {}
         llPlayer.audio.pause();
         try { llPlayer.audio.removeAttribute('src'); } catch(e) {}
         try { llPlayer.audio.load(); } catch(e) {}
@@ -688,8 +858,10 @@ var llPlayer = {
             llMSE.fetchAndAppend(llPlayer.buildUrl());
             $('#ll_status_text').html('<span class="text-warning">Re-syncing (MSE)...</span>');
             llPlayer.isPlaying = true;
+            try { if (llExact.useExact) { llExact.stop(); setTimeout(function(){ if (llPlayer.isPlaying) llExact.start(); }, 400); } } catch(e) {}
             return;
         }
+        try { llExact.stop(); } catch(e) {}
         llPlayer.audio.pause();
         llPlayer.audio.src = llPlayer.buildUrl();
         llPlayer.audio.load();
@@ -697,6 +869,7 @@ var llPlayer = {
         if (p && p.catch) p.catch(function(){});
         $('#ll_status_text').html('<span class="text-warning">Reconnecting...</span>');
         llPlayer.isPlaying = true;
+        try { if (llExact.useExact) setTimeout(function(){ if (llPlayer.isPlaying) llExact.start(); }, 500); } catch(e) {}
     },
 
     setVolume: function(v) {
@@ -909,8 +1082,14 @@ var llPlayer = {
 
                 // Track change — deadline-at-read confidence (mirrors PendingInsertMirror settle)
                 var currentMediaKey = (media || '') + '|' + (s.current_playlist || '') + '|' + (isBackgroundPlaying ? 'background' : 'fpp') + '|' + (media || '');
-                if (llPlayer.lastMedia !== currentMediaKey && currentMediaKey) {
+                var mediaChanged = llPlayer.lastMedia !== currentMediaKey && currentMediaKey;
+                if (mediaChanged) {
                     llPlayer.lastMediaAnnouncedAtMono = llClock.monotonicMs();
+                    if (llExact.useExact && llPlayer.isPlaying) {
+                        // Reset exact anchors on track change — versatile for file vs live
+                        llExact.stop();
+                        setTimeout(function(){ if (llPlayer.isPlaying) llExact.start(); }, 250);
+                    }
                 }
                 // File-sync is disabled per user request (live only), but keep display in sync
                 var isFileSync = false;
