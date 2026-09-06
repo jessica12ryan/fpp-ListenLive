@@ -394,16 +394,23 @@ var llExactAudio = {
             var nowWall = Date.now();
             var serverWall = d.wall_ms || d.server_wall_ms || nowWall;
             var master = (typeof d.extrapolated_seconds === 'number' ? d.extrapolated_seconds : d.seconds) + (nowWall - serverWall)/1000;
-            // Detect song change — if media changed, don't wait for nextStart, schedule next chunk immediately after current
             var isNewSong = self.lastMedia && self.lastMedia.split('|')[0] !== d.media;
             if (isNewSong) {
-                console.log('AudioContext new song', d.media, 'seek', Math.floor(master));
-                // Keep nextStart as is for gapless (old file ends, new starts), but clear lastMedia so we fetch from 0
-                // Don't reset nextStart to now, keep gapless
+                console.log('AudioContext new song', d.media, 'master', master.toFixed(1));
+                // New song: clear any pending fetch for old file, start new file gapless
+                // Don't keep old nextStart far in future — new file should start soon after old ends
+                // If nextStart is still > ctx.currentTime+1.0, keep it for gapless, else start now
+                if (self.nextStart - self.ctx.currentTime > 2.0) {
+                    // Old file still has 2s queued, keep gapless at nextStart
+                } else {
+                    // Old queue almost empty, start new file immediately
+                    self.nextStart = self.ctx.currentTime + 0.15;
+                }
             }
-            // 5s chunk aligned for low buffering
             var seek = Math.floor(Math.max(0, master) / 5) * 5;
-            if (isNewSong) seek = 0;
+            if (isNewSong) {
+                self.lastMedia = null;
+            }
             var mediaKey = d.media + '|' + seek;
             if (self.lastMedia === mediaKey && !isNewSong) {
                 self.fetching = false;
