@@ -405,9 +405,14 @@ var llExactAudio = {
                 // For exact, new file's first chunk should be from master, not 0, so seek stays master/5*5 (already)
                 // Keep nextStart for gapless, don't reset to now+0.15 (that would cut old file's tail)
             }
-            // Exact <250ms: seek to master, not 5s aligned, for frame
+            var duration = d.duration || (d.seconds + (d.seconds_remaining||0)) || 0;
+            if (duration > 0 && master > duration - 0.3) {
+                console.log('AudioContext near end', master.toFixed(1), '/', duration);
+                self.fetching = false;
+                return setTimeout(function(){ self.schedule(); }, 300);
+            }
+            // Exact <250ms: seek to master for frame
             var seek = Math.max(0, master);
-            // For gapless, still fetch 5s chunk from seek
             var mediaKey = d.media + '|' + Math.floor(seek);
             var queuedNow = self.nextStart - self.ctx.currentTime;
             if (self.lastMedia === mediaKey && !isNewSong && queuedNow > 1.0) {
