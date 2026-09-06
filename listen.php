@@ -140,11 +140,13 @@ var llClock = {
 // and nudges native <audio> playbackRate to stay frame-locked. No blob: CSP needed.
 var llExact = {
     useExact: false,
-    enabled: true, // always available — uses sync endpoint, not MediaSource
+    enabled: true,
     pollTimer: null,
     lastSync: null,
+    startWall: null,
     startMono: null,
     startElapsed: null,
+    startLatency: 1.3,
     drift: 0,
     corrections: 0,
     init: function() {
@@ -180,25 +182,25 @@ var llExact = {
     start: function() {
         llExact.stop();
         if (!llExact.useExact || !llPlayer.isPlaying) return;
-        // Fetch initial sync to anchor startMono/startElapsed
+        // Fetch initial sync to anchor startWall/startElapsed (wall, not monotonic — client/server monotonic not comparable)
         $.ajax({url:'api/plugin/fpp-ListenLive/sync', type:'GET', dataType:'json', success:function(d){
             if (d && d.has_media && typeof d.extrapolated_seconds === 'number' && d.extrapolated_seconds >= 0) {
-                llExact.startMono = (d.monotonic_ms || d.server_monotonic_ms || llClock.monotonicMs());
+                llExact.startWall = (d.wall_ms || d.server_wall_ms || Date.now());
                 llExact.startElapsed = d.extrapolated_seconds;
-                // Also anchor audio start
                 llExact.startAudioTime = llPlayer.audio ? llPlayer.audio.currentTime : 0;
+                llExact.startLatency = 1.3; // file-sync seek offset; live is 0
             } else {
-                llExact.startMono = llClock.monotonicMs();
+                llExact.startWall = Date.now();
                 llExact.startElapsed = 0;
                 llExact.startAudioTime = 0;
+                llExact.startLatency = 0;
             }
-            // Poll every 100ms for frame-exact — versatile across single/multi
             llExact.pollTimer = setInterval(llExact.poll, 100);
         }, error:function(){
-            // still start polling even if first fetch failed
-            llExact.startMono = llClock.monotonicMs();
+            llExact.startWall = Date.now();
             llExact.startElapsed = 0;
             llExact.startAudioTime = llPlayer.audio ? llPlayer.audio.currentTime : 0;
+            llExact.startLatency = 0;
             llExact.pollTimer = setInterval(llExact.poll, 100);
         }});
     },
@@ -222,23 +224,21 @@ var llExact = {
                     return;
                 }
                 llExact.lastSync = d;
-                var nowMono = llClock.monotonicMs();
-                var serverMono = d.monotonic_ms || d.server_monotonic_ms || nowMono;
-                var rttComp = 0; // TODO: measure RTT via clock endpoint; assume 20ms
+                var nowWall = Date.now();
+                var serverWall = d.wall_ms || d.server_wall_ms || nowWall;
+                var rttComp = 0;
                 var extrapolated = (typeof d.extrapolated_seconds === 'number') ? d.extrapolated_seconds : d.seconds;
-                // Compensate for poll delay: add (nowMono - serverMono)/1000
-                var age = (nowMono - serverMono) / 1000;
+                var age = (nowWall - serverWall) / 1000;
                 if (age >=0 && age < 1.0) extrapolated += age;
                 extrapolated += rttComp;
 
-                // For file-sync: audio.currentTime is time since stream start, not elapsed
-                // Expected audio time = extrapolated - startElapsed + startAudioTime
-                // But if live capture (stream is live mix, not file), extrapolated is file position,
-                // and audio.currentTime is unrelated — in that case don't nudge, just show drift
                 var isFileSync = d.media && d.media.indexOf('.mp3') !== -1;
                 var expectedAudioTime;
                 if (isFileSync && llExact.startElapsed !== null) {
-                    expectedAudioTime = (extrapolated - llExact.startElapsed) + (llExact.startAudioTime || 0);
+                    // File-sync stream was seeked to startElapsed - latency, so audio 0 = startElapsed - latency
+                    // To be frame-exact (media time = server time), audio should be at extrapolated - (startElapsed - latency)
+                    var latency = llExact.startLatency || 1.3;
+                    expectedAudioTime = (extrapolated - llExact.startElapsed) + (llExact.startAudioTime || 0) + latency;
                 } else {
                     // Live: just compare wall vs audio progress — keep at 1.0 unless buffering
                     expectedAudioTime = extrapolated;
@@ -282,8 +282,8 @@ var llExact = {
                     console.log('exact hard resync', drift);
                     $('#ll_exact_status').text('exact • hard resync');
                     llExact.corrections = 0;
-                    // Don't auto-reconnect if live — just reset anchors
-                    llExact.startMono = nowMono;
+                    llExact.startWall = nowWall;
+                    llExact.startMono = nowWall;
                     llExact.startElapsed = extrapolated;
                     llExact.startAudioTime = actual;
                     try { llPlayer.audio.playbackRate = 1.0; } catch(e) {}
