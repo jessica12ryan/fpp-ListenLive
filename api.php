@@ -1375,16 +1375,16 @@ function llMediaStreamEndpoint() {
             }
         }
     }
-    // Simple seek by byte offset estimation if requested
-    if ($seek > 0) {
-        $bitrateBytes = 16000;
-        $offset = (int)($seek * $bitrateBytes);
-        // For accurate seek with ffmpeg, we could use ffmpeg -ss, but for now just send file with Content-Range hint via 206
-        // Fallback: use ffmpeg to transcode with seek for exact sync
+    // Seek with optional duration for chunked exact fetch (5s)
+    $duration = isset($_GET['duration']) ? (float)$_GET['duration'] : 0;
+    if ($seek > 0 || $duration > 0) {
         $ffmpeg = llFindFfmpeg();
-        $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . (int)$seek . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -f mp3 -';
+        $durArg = $duration > 0 ? ' -t ' . escapeshellarg((string)$duration) : '';
+        // Use accurate seek after -i for exact frame, with -copytb 1 for gapless
+        $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . (int)$seek . ' -i ' . escapeshellarg($path) . $durArg . ' -codec:a libmp3lame -b:a 128k -write_xing 0 -id3v2_version 0 -f mp3 -';
         header('Content-Type: audio/mpeg');
         llHeaderRemove('Content-Length');
+        header('Cache-Control: no-cache');
         set_time_limit(0);
         while (ob_get_level() > 0) @ob_end_clean();
         $handle = @popen($cmd . ' 2>/dev/null', 'r');

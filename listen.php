@@ -352,8 +352,8 @@ var llExactAudio = {
         this.queue = [];
         this.fetching = false;
         this.lastMedia = null;
-        // Mute native <audio> when AudioContext is active to avoid double
-        try { llPlayer.audio.muted = true; } catch(e) {}
+        // Keep native audible — exact frames via AudioContext, not muted (versatile)
+        try { llPlayer.audio.muted = llPlayer.isMuted; } catch(e) {}
         this.schedule();
     },
     stop: function() {
@@ -392,8 +392,8 @@ var llExactAudio = {
                 // Keep nextStart as is for gapless (old file ends, new starts), but clear lastMedia so we fetch from 0
                 // Don't reset nextStart to now, keep gapless
             }
-            var seek = Math.floor(Math.max(0, master));
-            // For new song, seek should be 0, not master of old file
+            // 5s chunk aligned for low buffering
+            var seek = Math.floor(Math.max(0, master) / 5) * 5;
             if (isNewSong) seek = 0;
             var mediaKey = d.media + '|' + seek;
             if (self.lastMedia === mediaKey && !isNewSong) {
@@ -401,12 +401,12 @@ var llExactAudio = {
                 return setTimeout(function(){ self.schedule(); }, 150);
             }
             self.lastMedia = mediaKey;
-            var url = 'api/plugin/fpp-ListenLive/media?file=' + encodeURIComponent(d.media) + '&seek=' + seek;
+            // Fetch 5s chunk for low buffering (was whole file)
+            var url = 'api/plugin/fpp-ListenLive/media?file=' + encodeURIComponent(d.media) + '&seek=' + seek + '&duration=5';
             fetch(url).then(function(resp){
                 if (!resp.ok) throw new Error('media fetch '+resp.status);
                 return resp.arrayBuffer();
             }).then(function(buf){
-                // Guard against empty or JSON error payload (when media not found)
                 if (buf.byteLength < 1024) {
                     try {
                         var txt = new TextDecoder().decode(buf.slice(0,200));
