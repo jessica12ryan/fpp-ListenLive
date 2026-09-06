@@ -726,8 +726,8 @@ function llBuildFfmpegCommand($settings, $detection) {
     // NOTE: Do NOT add silence fallback here — file sync is preferred over silence.
     // Silence would show as "playing" but be inaudible, confusing users.
 
-    // Append encoding args to each attempt
-    $enc = ' -ac ' . $channels . ' -ar ' . $sr . ' -codec:a libmp3lame -b:a ' . escapeshellarg($bitrate) . ' -f mp3 -flush_packets 1 -';
+    // Append encoding args to each attempt — strip ID3/XING for MSE-friendly raw frames
+    $enc = ' -ac ' . $channels . ' -ar ' . $sr . ' -codec:a libmp3lame -b:a ' . escapeshellarg($bitrate) . ' -write_xing 0 -id3v2_version 0 -f mp3 -flush_packets 1 -';
 
     $cmds = [];
     foreach ($attempts as $a) {
@@ -1117,7 +1117,7 @@ function llStreamFileSync($isExplicitFileMode) {
             ignore_user_abort(true);
             @ini_set('zlib.output_compression', '0');
             ob_implicit_flush(1);
-            $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -i ' . escapeshellarg($streamUrl) . ' -codec:a libmp3lame -b:a 128k -f mp3 -flush_packets 1 -';
+            $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -i ' . escapeshellarg($streamUrl) . ' -codec:a libmp3lame -b:a 128k -write_xing 0 -id3v2_version 0 -f mp3 -flush_packets 1 -';
             $handle = @popen($cmd . ' 2>/dev/null', 'r');
             if ($handle) {
                 while (!feof($handle) && connection_status() === CONNECTION_NORMAL) {
@@ -1164,7 +1164,7 @@ function llStreamFileSync($isExplicitFileMode) {
             elseif (isset($fallback['bgStatus']['duration']) && is_numeric($fallback['bgStatus']['duration'])) $duration = (float)$fallback['bgStatus']['duration'];
             $remaining = $duration > 0 ? max(0, $duration - $elapsed) : 0;
             $durationArg = $remaining > 0 ? ' -t ' . escapeshellarg((string)($remaining + 0.5)) : '';
-            $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)$seekPos) . $durationArg . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -f mp3 -flush_packets 1 -';
+            $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)$seekPos) . $durationArg . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -write_xing 0 -id3v2_version 0 -f mp3 -flush_packets 1 -';
             $handle = @popen($cmd . ' 2>/dev/null', 'r');
             if ($handle) {
                 while (!feof($handle) && connection_status() === CONNECTION_NORMAL) {
@@ -1185,7 +1185,7 @@ function llStreamFileSync($isExplicitFileMode) {
                         $elapsed = (float)($nextFallback['elapsed'] ?? 0);
                         llLog('Stream file sync seamless to next track: ' . $path . ' elapsed=' . $elapsed);
                         $seekPos = LLSyncTiming::seekPosition($elapsed, LLSyncTiming::SEEK_LATENCY_SEAMLESS_S);
-                        $cmd2 = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)$seekPos) . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -f mp3 -flush_packets 1 -';
+                        $cmd2 = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)$seekPos) . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -write_xing 0 -id3v2_version 0 -f mp3 -flush_packets 1 -';
                         $handle2 = @popen($cmd2 . ' 2>/dev/null', 'r');
                         if ($handle2) {
                             while (!feof($handle2) && connection_status() === CONNECTION_NORMAL) {

@@ -272,16 +272,27 @@ var llMSE = {
         llMSE.controller = new AbortController();
         console.log('MSE fetching', url);
         fetch(url, {signal: llMSE.controller.signal, cache: 'no-store'}).then(function(resp) {
-            if (!resp.ok || !resp.body) throw new Error('fetch failed ' + resp.status);
+            if (!resp.ok) {
+                // 503 idle is expected when nothing playing — not a live-capture failure
+                if (resp.status === 503) {
+                    console.log('MSE 503 idle — will retry when playing');
+                    llMSE.fetching = false;
+                    if (llPlayer.isPlaying && llMSE.useMSE) {
+                        setTimeout(function(){ if (llPlayer.isPlaying) llMSE.fetchAndAppend(llPlayer.buildUrl()); }, 1500);
+                    }
+                    return;
+                }
+                throw new Error('fetch failed ' + resp.status);
+            }
+            if (!resp.body) throw new Error('fetch failed no body');
             var reader = resp.body.getReader();
+            var firstChunk = true;
             function pump() {
                 return reader.read().then(function(result) {
                     if (result.done) {
                         llMSE.fetching = false;
                         console.log('MSE fetch done');
-                        // server may keep stream open for gapless; if it closed (file-sync end) and still playing, auto-fetch next
                         if (llPlayer.isPlaying && llMSE.useMSE && llMSE.mediaSource && llMSE.mediaSource.readyState === 'open') {
-                            // small gap before next track — server seamless already concatenates, but if file ended, fetch next
                             setTimeout(function(){
                                 if (llPlayer.isPlaying && !llMSE.fetching && llMSE.useMSE) {
                                     console.log('MSE auto-fetch next track');
@@ -292,8 +303,29 @@ var llMSE = {
                         return;
                     }
                     var chunk = result.value;
+                    // Strip ID3v2 if present on first chunk — MediaSource mp3 demuxer rejects ID3
+                    if (firstChunk && chunk && chunk.length >= 10 && chunk[0]===0x49 && chunk[1]===0x44 && chunk[2]===0x33) {
+                        var size = ((chunk[6] & 0x7F) << 21) | ((chunk[7] & 0x7F) << 14) | ((chunk[8] & 0x7F) << 7) | (chunk[9] & 0x7F);
+                        var total = 10 + size;
+                        console.log('MSE stripping ID3v2', total, 'bytes');
+                        if (chunk.length > total) chunk = chunk.slice(total);
+                        else { firstChunk = false; return pump(); } // ID3 spans chunks — drop this chunk
+                    }
+                    firstChunk = false;
+                    // Detect JSON error payload (503 idle returned as json but resp.ok true edge case)
+                    if (chunk && chunk.length < 500) {
+                        try {
+                            var txt = new TextDecoder().decode(chunk.slice(0, 200));
+                            if (txt.trim().startsWith('{') && txt.indexOf('\"success\"') !== -1 && txt.indexOf('Stream unavailable') !== -1) {
+                                console.log('MSE got JSON idle payload instead of mp3 — retrying');
+                                llMSE.fetching = false;
+                                try { llMSE.controller.abort(); } catch(e) {}
+                                setTimeout(function(){ if (llPlayer.isPlaying) llMSE.fetchAndAppend(llPlayer.buildUrl()); }, 1500);
+                                return;
+                            }
+                        } catch(e) {}
+                    }
                     llMSE.enqueue(chunk);
-                    // attempt play once we have some data
                     if (llMSE.audio.paused && llMSE.audio.readyState >= 1 && llMSE.sourceBuffer && !llMSE.sourceBuffer.updating) {
                         var p = llMSE.audio.play();
                         if (p && p.catch) p.catch(function(){});
@@ -431,6 +463,15 @@ var llPlayer = {
             if (code === 4) msg += ' — source returned no audio or unsupported format';
             if (code === 2) msg += ' — network error';
             if (code === 3) msg += ' — decoding failed';
+            // MSE path has its own fetch/append error handling — don't double-report as live capture
+            if (llMSE.useMSE) {
+                console.warn('audio.error in MSE mode', code, err);
+                $('#ll_badge').removeClass('ll-badge-live ll-badge-idle').addClass('ll-badge-warn').text('MSE Error');
+                $('#ll_status_text').html('<span class="text-warning">' + escHtml(msg) + ' (MSE) — trying native fallback…</span>');
+                // Give MSE a moment, then fallback if still failing
+                setTimeout(function(){ if (llMSE.useMSE && llPlayer.isPlaying) llMSE.fallbackToNative(); }, 1200);
+                return;
+            }
             llPlayer.reconnectAttempts = (llPlayer.reconnectAttempts || 0) + 1;
             $('#ll_badge').removeClass('ll-badge-live ll-badge-idle').addClass('ll-badge-warn').text('Error');
             $('#ll_status_text').html('<span class="text-danger">' + escHtml(msg) + ' (attempt ' + llPlayer.reconnectAttempts + '). Checking diagnostics...</span>');
