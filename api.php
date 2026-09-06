@@ -1534,7 +1534,7 @@ function llSyncEndpoint() {
     // Try direct C++ API via fppd (port 32322) — most precise, no file race
     $cppSync = null;
     if (function_exists('curl_init')) {
-        $ch = curl_init('http://127.0.0.1:32322/api/plugin-apis/ListenLive/sync');
+        $ch = curl_init('http://127.0.0.1:32322/ListenLive/sync');
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_TIMEOUT, 1);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 1);
@@ -1598,7 +1598,7 @@ function llClockEndpoint() {
     $nowWall = LLSyncTiming::wallClockMs();
     // Try C++ clock first
     if (function_exists('curl_init')) {
-        $ch = curl_init('http://127.0.0.1:32322/api/plugin-apis/ListenLive/clock');
+        $ch = curl_init('http://127.0.0.1:32322/ListenLive/clock');
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_TIMEOUT, 1);
         $tmp = @curl_exec($ch);
