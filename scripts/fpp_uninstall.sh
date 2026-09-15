@@ -10,8 +10,9 @@
 
 : "${FPPDIR:=/opt/fpp}"
 if [ -f "${FPPDIR}/scripts/common" ]; then
-    . "${FPPDIR}/scripts/common"
-    setSetting restartFlag 1
+    ( set +u; source "${FPPDIR}/scripts/common" && setSetting restartFlag 1 ) || true
+elif [ -f "/opt/fpp/scripts/common" ]; then
+    ( set +u; source "/opt/fpp/scripts/common" && setSetting restartFlag 1 ) || true
 fi
 
 # Kill any lingering ffmpeg streams from this plugin (avoid killing this script itself)

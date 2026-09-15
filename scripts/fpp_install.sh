@@ -77,7 +77,7 @@ chmod +x "${PLUGIN_DIR}/scripts/"*.php 2>/dev/null || true
 
 # Check ffmpeg
 if ! command -v ffmpeg >/dev/null 2>&1; then
-    echo "fpp-ListenLive: WARNING - ffmpeg not found. Install with: sudo apt update && sudo apt install -y ffmpeg"
+    echo "fpp-ListenLive: WARNING - ffmpeg not found. Install with: apt update && apt install -y ffmpeg"
     echo "fpp-ListenLive: File-sync fallback will be used until ffmpeg is available."
 else
     echo "fpp-ListenLive: ffmpeg found at $(command -v ffmpeg)"
@@ -89,6 +89,33 @@ if command -v pactl >/dev/null 2>&1; then
 fi
 if [ -f /proc/asound/cards ]; then
     echo "fpp-ListenLive: ALSA detected"
+fi
+
+# Build native sync plugin (frame-exact MultiSync) if build tools and FPP headers are present
+# This provides /api/plugin-apis/ListenLive/sync and /ListenLive/clock with monotonic clock;
+# file-sync fallback works without it, but exact sync requires the .so.
+if [ -f "${FPPDIR:-/opt/fpp}/src/Plugin.h" ] && [ -f "${PLUGIN_DIR}/Makefile" ]; then
+    echo "fpp-ListenLive: Building native component..."
+    if make -C "${PLUGIN_DIR}" -j$(nproc 2>/dev/null || echo 1) 2>&1; then
+        echo "fpp-ListenLive: Native component built."
+        # Ensure .so is owned by fpp so fppd (running as fpp or root) can dlopen it
+        chown fpp:fpp "${PLUGIN_DIR}/libfpp-ListenLive.so" 2>/dev/null || chown :fpp "${PLUGIN_DIR}/libfpp-ListenLive.so" 2>/dev/null || true
+        chmod 644 "${PLUGIN_DIR}/libfpp-ListenLive.so" 2>/dev/null || true
+    else
+        echo "fpp-ListenLive: Native build failed - file-sync fallback will be used. Check /opt/fpp/src exists and build tools are installed (build-essential)."
+    fi
+else
+    echo "fpp-ListenLive: Skipping native build (FPP headers not found at ${FPPDIR}/src/Plugin.h) - file-sync fallback will be used."
+fi
+
+# Request fppd restart so new native component is picked up. PluginManager only
+# reads native plugins at startup, and hot-load is FPP 10+ only; FPP 8/9 still
+# need a full restart. The safe snippet handles set -u and missing FPPDIR (see
+# lint_plugin.py RESTART_FLAG_SNIPPET).
+if [ -f "${FPPDIR:-/opt/fpp}/scripts/common" ]; then
+    ( set +u; source "${FPPDIR:-/opt/fpp}/scripts/common" && setSetting restartFlag 1 ) || true
+elif [ -f "/opt/fpp/scripts/common" ]; then
+    ( set +u; source "/opt/fpp/scripts/common" && setSetting restartFlag 1 ) || true
 fi
 
 echo "fpp-ListenLive: Plugin installed successfully."

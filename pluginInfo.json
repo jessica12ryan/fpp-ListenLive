@@ -7,6 +7,16 @@
 	"srcURL": "https://github.com/jessica12ryan/fpp-ListenLive.git",
 	"bugURL": "https://github.com/jessica12ryan/fpp-ListenLive/issues",
 	"iconURL": "https://raw.githubusercontent.com/jessica12ryan/fpp-ListenLive/main/icon.png",
+	"privacy": {
+		"summary": "Streams your show's live audio to your browser on your home network so you can hear what the audience hears. Nothing is sent to the internet.",
+		"sends": [],
+		"collects": [],
+		"sensors": [],
+		"remoteAccess": "none",
+		"systemChanges": [],
+		"closedCode": false,
+		"other": "Settings stay in config/settings.json and the log stays at logs/plugin-fpp-ListenLive.log until you clear them. Your browser keeps its own volume choice in localStorage."
+	},
 	"versions": [
 		{
 			"minFPPVersion": "8.0",

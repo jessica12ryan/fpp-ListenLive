@@ -4,7 +4,13 @@ for var in "$@"
 do
     case $var in
         -l|--list)
-            echo "c++"
+            # Only advertise C++ if the native library was actually built.
+            # File-sync fallback works without it, so avoid Warning ID 5
+            # ("Could not load plugin") when headers/build tools were missing.
+            DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+            if [ -f "${DIR}/libfpp-ListenLive.so" ] || [ -f "${DIR}/libfpp-ListenLive.dylib" ]; then
+                echo "c++"
+            fi
             exit 0
         ;;
         -h|--help)
