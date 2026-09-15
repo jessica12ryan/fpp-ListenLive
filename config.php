@@ -57,14 +57,13 @@ $settings = $llSettings;
         <div class="p-3">
             <table>
                 <tr>
-                    <td style="padding: 4px;"><b>Enable Live Streaming:</b></td>
+                    <td style="padding: 4px;"><b>Enable Live Streaming:</b> <span id="ll_enabled_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="When enabled, FPP captures its live audio output and streams it to your browser via api/plugin/fpp-ListenLive/stream as audio/mpeg. When disabled, that endpoint returns HTTP 503 Service Unavailable and the player shows &quot;Listen Live is disabled.&quot;"><img id="ll_enabled_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span></td>
                     <td style="padding: 4px;">
                         <input type="checkbox" id="ll_enabled" <?php echo !empty($settings['enabled']) ? 'checked' : ''; ?>>
-                        <span class="text-secondary" style="font-size:12px; margin-left:8px;">When disabled, the stream endpoint returns 503</span>
                     </td>
                 </tr>
                 <tr>
-                    <td style="padding: 4px;"><b>Audio Source:</b></td>
+                    <td style="padding: 4px;"><b>Audio Source:</b> <span id="ll_source_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="How FPP&#39;s audio is captured. Auto (recommended) tries PipeWire/PulseAudio monitor sources first — exact copy of what the audience hears, including sequences, media and effects — then falls back to ALSA loopback. Choose PulseAudio only or ALSA only to force a backend, or File Sync to stream the current media file directly (seeks to elapsed position)."><img id="ll_source_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span></td>
                     <td style="padding: 4px;">
                         <select id="ll_source">
                             <option value="auto" <?php echo ($settings['source']==='auto'?'selected':''); ?>>Auto (try Pulse → ALSA)</option>
@@ -72,38 +71,34 @@ $settings = $llSettings;
                             <option value="alsa" <?php echo ($settings['source']==='alsa'?'selected':''); ?>>ALSA only</option>
                             <option value="file" <?php echo ($settings['source']==='file'?'selected':''); ?>>File Sync (stream media file)</option>
                         </select>
-                        <span class="text-secondary" style="font-size:12px; margin-left:6px;">Auto tries PulseAudio monitor then ALSA loopback</span>
                     </td>
                 </tr>
                 <tr id="row_pulse" style="<?php echo $settings['source']==='alsa' ? 'display:none;' : ''; ?>">
-                    <td style="padding: 4px;"><b>Pulse Source:</b></td>
+                    <td style="padding: 4px;"><b>Pulse Source:</b> <span id="ll_pulse_source_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="PipeWire/PulseAudio source to capture. Use &quot;auto&quot; to let the plugin pick the best monitor (prefers fpp_group_default.monitor on FPP 9+ with PipeWire, which carries the full show mix). Or enter a specific source name like alsa_output.platform-bcm2835_audio.stereo-fallback.monitor. Detected sources are listed below."><img id="ll_pulse_source_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span></td>
                     <td style="padding: 4px;">
                         <input type="text" id="ll_pulse_source" size="30" value="<?php echo htmlspecialchars($settings['pulse_source'] ?? 'auto'); ?>" placeholder="auto">
-                        <span class="text-secondary" style="font-size:12px;">Use "auto" or a specific source like alsa_output.platform-bcm2835_audio.stereo-fallback.monitor</span>
                         <div id="ll_pulse_list" class="text-secondary" style="font-size:12px; margin-top:4px;"></div>
                     </td>
                 </tr>
                 <tr id="row_alsa" style="<?php echo $settings['source']==='pulse' ? 'display:none;' : ''; ?>">
-                    <td style="padding: 4px;"><b>ALSA Device:</b></td>
+                    <td style="padding: 4px;"><b>ALSA Device:</b> <span id="ll_alsa_device_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="ALSA capture device. Common values: default (mixer default), hw:0,0 (first card, first device), plughw:0,0 (with format conversion). On some hardware you may need the snd-aloop loopback device (hw:Loopback,1,0) if your audio hardware doesn&#39;t support concurrent capture. Detected devices are listed below."><img id="ll_alsa_device_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span></td>
                     <td style="padding: 4px;">
                         <input type="text" id="ll_alsa_device" size="30" value="<?php echo htmlspecialchars($settings['alsa_device'] ?? 'default'); ?>" placeholder="default">
-                        <span class="text-secondary" style="font-size:12px;">Common: default, hw:0,0, plughw:0,0</span>
                         <div id="ll_alsa_list" class="text-secondary" style="font-size:12px; margin-top:4px;"></div>
                     </td>
                 </tr>
                 <tr>
-                    <td style="padding: 4px;"><b>Bitrate:</b></td>
+                    <td style="padding: 4px;"><b>Bitrate:</b> <span id="ll_bitrate_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="MP3 encoding bitrate. Higher = better quality but more CPU and bandwidth. 128k is recommended for show audio (5–10% CPU on Pi 4). Use 64k/96k if audio is choppy or CPU is high."><img id="ll_bitrate_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span></td>
                     <td style="padding: 4px;">
                         <select id="ll_bitrate">
                             <?php foreach (['64k','96k','128k','160k','192k','256k','320k'] as $br): ?>
                             <option value="<?php echo $br; ?>" <?php echo ($settings['bitrate']===$br?'selected':''); ?>><?php echo $br; ?></option>
                             <?php endforeach; ?>
                         </select>
-                        <span class="text-secondary" style="font-size:12px;">128k is recommended for show audio</span>
                     </td>
                 </tr>
                 <tr>
-                    <td style="padding: 4px;"><b>Sample Rate:</b></td>
+                    <td style="padding: 4px;"><b>Sample Rate:</b> <span id="ll_samplerate_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="Audio sample rate. 44100 Hz (CD quality) is recommended and matches most show media. Use 48000 Hz if your media is 48 kHz, or 22050 Hz for low-bandwidth."><img id="ll_samplerate_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span></td>
                     <td style="padding: 4px;">
                         <select id="ll_samplerate">
                             <option value="44100" <?php echo ($settings['sample_rate']==44100?'selected':''); ?>>44100 Hz (CD)</option>
@@ -114,7 +109,7 @@ $settings = $llSettings;
                     </td>
                 </tr>
                 <tr>
-                    <td style="padding: 4px;"><b>Channels:</b></td>
+                    <td style="padding: 4px;"><b>Channels:</b> <span id="ll_channels_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="Number of audio channels. Stereo (2) preserves left/right. Mono (1) halves bandwidth and is fine for voice announcements."><img id="ll_channels_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span></td>
                     <td style="padding: 4px;">
                         <select id="ll_channels">
                             <option value="2" <?php echo ($settings['channels']==2?'selected':''); ?>>Stereo (2)</option>
@@ -254,6 +249,7 @@ $(document).ready(function(){
         $('#row_alsa').toggle(v !== 'pulse' && v !== 'file');
     });
     llConfig.refreshSources();
+    if (typeof SetupToolTips === 'function') SetupToolTips();
 });
 </script>
 
