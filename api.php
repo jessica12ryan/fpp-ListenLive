@@ -10,9 +10,29 @@
  */
 
 define('LL_PLUGIN_DIR', __DIR__);
-define('LL_SETTINGS_FILE', LL_PLUGIN_DIR . '/config/settings.json');
-define('LL_LOG_DIR', getenv('LOGDIR') ?: '/home/fpp/media/logs');
-define('LL_LOG_FILE', LL_LOG_DIR . '/plugin-fpp-ListenLive.log');
+define('LL_PLUGIN_NAME', 'fpp-ListenLive');
+define('LL_SETTINGS_FILE', LL_PLUGIN_DIR . '/config/settings.json'); // legacy fallback
+// Single canonical log: <logdir>/plugin-fpp-ListenLive.log (§1)
+function llGetLogFile() {
+    // Prefer FPP's own logDirectory (§1 snippet) — falls back to daemon LOGDIR
+    if (isset($GLOBALS['settings']['logDirectory']) && is_string($GLOBALS['settings']['logDirectory']) && $GLOBALS['settings']['logDirectory'] !== '') {
+        return rtrim($GLOBALS['settings']['logDirectory'], '/') . '/plugin-' . LL_PLUGIN_NAME . '.log';
+    }
+    $ld = getenv('LOGDIR');
+    if (is_string($ld) && $ld !== '') return rtrim($ld, '/') . '/plugin-' . LL_PLUGIN_NAME . '.log';
+    if (isset($GLOBALS['settings']['mediaDirectory']) && is_string($GLOBALS['settings']['mediaDirectory']) && $GLOBALS['settings']['mediaDirectory'] !== '') {
+        return rtrim($GLOBALS['settings']['mediaDirectory'], '/') . '/logs/plugin-' . LL_PLUGIN_NAME . '.log';
+    }
+    return '/home/fpp/media/logs/plugin-' . LL_PLUGIN_NAME . '.log';
+}
+function llGetPlugindataDir() {
+    if (isset($GLOBALS['settings']['mediaDirectory']) && is_string($GLOBALS['settings']['mediaDirectory']) && $GLOBALS['settings']['mediaDirectory'] !== '') {
+        return rtrim($GLOBALS['settings']['mediaDirectory'], '/') . '/plugindata/' . LL_PLUGIN_NAME;
+    }
+    $md = getenv('MEDIADIR');
+    if (is_string($md) && $md !== '') return rtrim($md, '/') . '/plugindata/' . LL_PLUGIN_NAME;
+    return '/home/fpp/media/plugindata/' . LL_PLUGIN_NAME;
+}
 
 // Host-testable timing helper (no FPP deps) — mirrors PulseMesh discipline
 require_once __DIR__ . '/src/Timing.php';
@@ -23,13 +43,23 @@ function llLog($msg) {
     if (strpos($msg, 'Stream probe no data') !== false) {
         $errCount++;
         if ($errCount > 10 && $errCount < 11) {
-            @file_put_contents(LL_LOG_FILE, date('Y-m-d H:i:s') . ' fpp-ListenLive api: further probe errors suppressed' . "\n", FILE_APPEND | LOCK_EX);
+            @file_put_contents(llGetLogFile(), date('Y-m-d H:i:s') . ' fpp-ListenLive api: further probe errors suppressed' . "\n", FILE_APPEND | LOCK_EX);
         }
         if ($errCount > 10) return;
     } else {
         $errCount = 0;
     }
-    @file_put_contents(LL_LOG_FILE, date('Y-m-d H:i:s') . ' fpp-ListenLive api: ' . $msg . "\n", FILE_APPEND | LOCK_EX);
+    @file_put_contents(llGetLogFile(), date('Y-m-d H:i:s') . ' fpp-ListenLive api: ' . $msg . "\n", FILE_APPEND | LOCK_EX);
+}
+
+function llEnsureCommonLoaded() {
+    if (function_exists('ReadSettingFromFile') && function_exists('WriteSettingToFile')) return true;
+    // api.php runs outside the FPP page include — pull in common.php for the stable settings API (§3.1)
+    $candidates = ['/opt/fpp/www/common.php', __DIR__ . '/../www/common.php'];
+    foreach ($candidates as $c) {
+        if (is_readable($c)) { @include_once($c); break; }
+    }
+    return function_exists('ReadSettingFromFile') && function_exists('WriteSettingToFile');
 }
 
 function llLoadSettings() {
@@ -44,17 +74,49 @@ function llLoadSettings() {
         'volume' => 100,
         'allow_remote' => 0
     ];
-    if (!file_exists(LL_SETTINGS_FILE)) {
-        return $defaults;
+    // Preferred: FPP's plugin config store config/plugin.fpp-ListenLive (§3.5)
+    if (llEnsureCommonLoaded()) {
+        $found = false;
+        $loaded = [];
+        foreach (array_keys($defaults) as $k) {
+            $v = @ReadSettingFromFile($k, LL_PLUGIN_NAME);
+            if ($v !== false && $v !== null && $v !== '') {
+                // Values are stored as strings; cast back to expected types
+                if (in_array($k, ['enabled','sample_rate','channels','volume','allow_remote'], true)) {
+                    $loaded[$k] = is_numeric($v) ? (int)$v : $v;
+                } else {
+                    $loaded[$k] = $v;
+                }
+                $found = true;
+            }
+        }
+        if ($found) {
+            return array_merge($defaults, $loaded);
+        }
     }
-    $s = json_decode(@file_get_contents(LL_SETTINGS_FILE), true);
-    if (!is_array($s)) {
-        return $defaults;
+    // Fallback: legacy JSON in plugin dir (pre-§3.5) — keep reading for migration
+    if (file_exists(LL_SETTINGS_FILE)) {
+        $s = json_decode(@file_get_contents(LL_SETTINGS_FILE), true);
+        if (is_array($s)) return array_merge($defaults, $s);
     }
-    return array_merge($defaults, $s);
+    return $defaults;
 }
 
 function llSaveSettings($s) {
+    // Preferred: FPP's plugin config store (§3.5)
+    if (llEnsureCommonLoaded()) {
+        $ok = true;
+        foreach ($s as $k => $v) {
+            // WriteSettingToFile expects string; it handles quoting
+            $str = is_bool($v) ? ($v ? '1' : '0') : (string)$v;
+            $res = @WriteSettingToFile($k, $str, LL_PLUGIN_NAME);
+            if ($res === false) $ok = false;
+        }
+        // Also keep legacy JSON in place for downgrade/migration (inside plugin dir — allowed)
+        if (!is_dir(LL_PLUGIN_DIR . '/config')) @mkdir(LL_PLUGIN_DIR . '/config', 0775, true);
+        @file_put_contents(LL_SETTINGS_FILE, json_encode($s, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+        return $ok;
+    }
     if (!is_dir(LL_PLUGIN_DIR . '/config')) {
         @mkdir(LL_PLUGIN_DIR . '/config', 0775, true);
     }
@@ -233,11 +295,11 @@ function llDetectAudioSources() {
 }
 
 function llGetFppStatus() {
-    // Use fppd's direct HTTP (port 32322) to avoid Apache deadlock, with very short timeout
-    // If fppd is not responding quickly, return default idle status to avoid hanging the FPP UI
+    // Use FPP's proxied API (Apache -> fppd) as the stable surface (§3.3).
+    // Very short timeout keeps the UI responsive if fppd is slow.
     $urls = [
-        'http://127.0.0.1:32322/fppd/status',
-        'http://localhost:32322/fppd/status',
+        'http://localhost/api/fppd/status',
+        'http://127.0.0.1/api/fppd/status',
     ];
 
     // Prefer curl with very short timeout to avoid hanging FPP UI
@@ -315,36 +377,7 @@ function llGetMultisyncElapsed() {
 }
 
 function llGetBackgroundMusicStatus() {
-    // Try direct file first (fastest, no HTTP deadlock) — status file is updated every second by GStreamer loop
-    $statusFile = '/tmp/bg_music_status.txt';
-    if (file_exists($statusFile) && is_readable($statusFile)) {
-        $lines = @file($statusFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        if ($lines) {
-            $data = [];
-            foreach ($lines as $line) {
-                $pos = strpos($line, '=');
-                if ($pos !== false) {
-                    $k = substr($line, 0, $pos);
-                    $v = substr($line, $pos + 1);
-                    $data[$k] = $v;
-                }
-            }
-            if (!empty($data['filename'])) {
-                $data['currentTrack'] = $data['filename'];
-                $data['trackElapsed'] = isset($data['elapsed']) ? (int)$data['elapsed'] : 0;
-                $data['trackDuration'] = isset($data['duration']) ? (int)$data['duration'] : 0;
-                $data['backgroundMusicRunning'] = true;
-                $data['_source'] = 'direct_file';
-                // Try to also get full API data for other fields, but return quickly if file is good
-                // Do a quick non-blocking HTTP check with 1s timeout, but don't hang
-                $urls = [
-                    'http://127.0.0.1:32322/fppd/status',
-                ];
-                // For now, return direct file data immediately to avoid HTTP deadlock
-                return $data;
-            }
-        }
-    }
+    // Use the BackgroundMusic plugin's own HTTP API (§3.3) — do not read /tmp files outside our plugindata (§5)
     $urls = [
         'http://localhost/api/plugin/fpp-plugin-BackgroundMusic/status',
         'http://127.0.0.1/api/plugin/fpp-plugin-BackgroundMusic/status',
@@ -371,32 +404,6 @@ function llGetBackgroundMusicStatus() {
         if ($json) {
             $data = json_decode($json, true);
             if (is_array($data)) return $data;
-        }
-    }
-    // Fallback: read status file directly (more up-to-date and works even if HTTP API is slow)
-    $statusFile = '/tmp/bg_music_status.txt';
-    if (file_exists($statusFile) && is_readable($statusFile)) {
-        $lines = @file($statusFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        if ($lines) {
-            $data = [];
-            foreach ($lines as $line) {
-                $pos = strpos($line, '=');
-                if ($pos !== false) {
-                    $k = substr($line, 0, $pos);
-                    $v = substr($line, $pos + 1);
-                    $data[$k] = $v;
-                }
-            }
-            if (!empty($data['filename'])) {
-                // Convert to API-like structure for compatibility
-                $data['currentTrack'] = $data['filename'];
-                $data['trackElapsed'] = isset($data['elapsed']) ? (int)$data['elapsed'] : 0;
-                $data['trackDuration'] = isset($data['duration']) ? (int)$data['duration'] : 0;
-                $data['backgroundMusicRunning'] = true;
-                // Also include raw for debugging
-                $data['_source'] = 'direct_file';
-                return $data;
-            }
         }
     }
     return null;
@@ -486,23 +493,7 @@ function llGetFallbackMedia() {
                 return ['path' => $path, 'type' => 'background', 'media' => $media, 'elapsed' => $bgElapsed, 'bgStatus' => $bg];
             }
         }
-        // Try reading playlist file directly for background (more reliable than mediaName)
-        if ($isPlaying && !empty($candidates)) {
-            $playlistFile = '/tmp/background_music_playlist.m3u';
-            if (file_exists($playlistFile)) {
-                $lines = @file($playlistFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-                if ($lines) {
-                    foreach ($lines as $line) {
-                        $line = trim($line);
-                        if ($line === '' || $line[0] === '#') continue;
-                        if (basename($line) === basename($candidates[0]) && file_exists($line)) {
-                            return ['path' => $line, 'type' => 'background', 'media' => basename($line), 'elapsed' => $bgElapsed, 'bgStatus' => $bg];
-                        }
-                    }
-                }
-            }
-        }
-        // If bg says playing but we couldn't find file, return bg status for diagnostics
+        // If bg says playing but we couldn't find file, return bg status for diagnostics (§5 — do not read another plugin's /tmp)
         if ($isPlaying || !empty($candidates)) {
             // Small retry for just-changed track (file may not be indexed yet)
             usleep(300000);
@@ -563,20 +554,7 @@ function llGetMediaPath($mediaName) {
         $candidate2 = rtrim($base, '/') . '/' . basename($mediaName);
         if (file_exists($candidate2)) return $candidate2;
     }
-    // Try background music playlist file (contains full paths)
-    $bgPlaylist = '/tmp/background_music_playlist.m3u';
-    if (file_exists($bgPlaylist)) {
-        $lines = @file($bgPlaylist, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        if ($lines) {
-            foreach ($lines as $line) {
-                $line = trim($line);
-                if ($line === '' || $line[0] === '#') continue;
-                if (basename($line) === basename($mediaName) && file_exists($line)) return $line;
-                if ($line === $mediaName && file_exists($line)) return $line;
-            }
-        }
-    }
-    // fallback: search via find (limited)
+    // fallback: search via find (limited) — do not read another plugin's /tmp (§5)
     $out = trim(@shell_exec('find /home/fpp/media -maxdepth 4 -name ' . escapeshellarg(basename($mediaName)) . ' 2>/dev/null | head -1') ?? '');
     if ($out && file_exists($out)) return $out;
     return null;
@@ -629,12 +607,9 @@ function llBuildFfmpegCommand($settings, $detection) {
             $envPrefix .= 'PIPEWIRE_REMOTE=/run/user/1000/pipewire-0 ';
         }
     }
-    // For PipeWire system service, fpp user gets Permission denied even though in audio group
-    // Use sudo (as root) for PipeWire, and sudo -u fpp for ALSA/pulse where needed
-    $canSudo = trim(@shell_exec('sudo -n true 2>&1 && echo yes') ?? '') === 'yes';
-    $canSudoFpp = trim(@shell_exec('sudo -n -u fpp true 2>&1 && echo yes') ?? '') === 'yes';
-    $sudoPrefix = $canSudoFpp ? 'sudo -u fpp ' : '';
-    $sudoRootPrefix = $canSudo ? 'sudo ' : '';
+    // Run as the FPP user (php-fpm/apache already runs as fpp); do not escalate via sudo (§6.2, §14 privilege)
+    $sudoPrefix = '';
+    $sudoRootPrefix = '';
 
     if ($source === 'auto' || $source === 'pulse' || $source === 'pipewire') {
         // PipeWire first — prioritize the actual FPP mix (fpp_group_default.monitor) which carries show + background
@@ -660,13 +635,12 @@ function llBuildFfmpegCommand($settings, $detection) {
                     $attempts[] = [$sudoRootPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($f), 'pipewire-pulse:' . $f];
                 }
             }
-            // OS-level capture via pw-record as root — most reliable for FPP's system PipeWire (fpp user gets Permission denied)
-            $pwSudo = trim(@shell_exec('sudo -n true 2>&1 && echo yes')) === 'yes' ? 'sudo ' : '';
+            // Capture via pw-record on the PipeWire graph — no privilege escalation (§5, §14)
             if (@shell_exec('which pw-record 2>/dev/null')) {
                 foreach (['fpp_group_default','bgmusic_main','bgmusic_crossfade','fpp_alsa_audio','0'] as $tgt) {
-                    $attempts[] = [$pwSudo . $envPrefix . 'pw-record --target ' . escapeshellarg($tgt) . ' - 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:' . $tgt];
+                    $attempts[] = [$envPrefix . 'pw-record --target ' . escapeshellarg($tgt) . ' - 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:' . $tgt];
                 }
-                $attempts[] = [$pwSudo . $envPrefix . 'pw-record - --rate 48000 --channels 2 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:default'];
+                $attempts[] = [$envPrefix . 'pw-record - --rate 48000 --channels 2 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:default'];
             }
             foreach ($monitors as $src) {
                 // Use sudo (as root) for PipeWire monitors — fpp gets Permission denied on system socket
@@ -707,8 +681,6 @@ function llBuildFfmpegCommand($settings, $detection) {
     }
     if ($source === 'alsa' || $source === 'auto') {
         $alsaDev = $settings['alsa_device'] ?? 'default';
-        // Try to ensure snd-aloop is loaded for OS-level capture when direct ALSA is used
-        @shell_exec('lsmod | grep -q snd_aloop || sudo modprobe snd-aloop 2>/dev/null');
         $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i ' . escapeshellarg($alsaDev), 'alsa:' . $alsaDev];
         if ($alsaDev !== 'default') {
             $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i default', 'alsa:default'];
@@ -724,9 +696,17 @@ function llBuildFfmpegCommand($settings, $detection) {
         $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i hw:Loopback,0,0', 'alsa:Loopback0'];
         // Try dsnoop for shared capture when device is busy
         $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i dsnoop:Loopback', 'alsa:dsnoop'];
-        // Try to get FPP's configured audio output device
-        $fppAudio = trim(@shell_exec('cat /home/fpp/media/config/FPPAudio 2>/dev/null || cat /home/fpp/media/settings 2>/dev/null | grep AudioOutput | cut -d= -f2') ?? '');
-        if ($fppAudio && $fppAudio !== $alsaDev && $fppAudio !== 'default') {
+        // Try to get FPP's configured audio output device via stable API (§3.4)
+        $fppAudio = '';
+        if (is_readable('/opt/fpp/www/common.php')) {
+            @include_once('/opt/fpp/www/common.php');
+            if (function_exists('getSetting')) {
+                $fppAudio = trim((string)@getSetting('AudioOutput'));
+            } elseif (isset($GLOBALS['settings']['AudioOutput'])) {
+                $fppAudio = trim((string)$GLOBALS['settings']['AudioOutput']);
+            }
+        }
+        if ($fppAudio !== '' && $fppAudio !== $alsaDev && $fppAudio !== 'default') {
             $attempts[] = [$sudoPrefix . $ffmpeg . ' -hide_banner -loglevel error -f alsa -i ' . escapeshellarg($fppAudio), 'alsa:fpp:' . $fppAudio];
         }
         // Try arecord pipe as last resort
@@ -819,10 +799,11 @@ function llStatusEndpoint() {
 
     // Server-side confidence: unresolved for 250ms after any media change (track change settle)
     $hasMedia = !empty($fallback['media']) || !empty($fppStatus['current_song']) || !empty($fppStatus['current_sequence']);
-    // Persist last media key tick via tmp file so confidence survives across PHP processes
+    // Persist last media key tick so confidence survives across PHP processes — in plugindata (§5)
     $announcedAtMs = null;
     $mediaKey = ($fallback['media'] ?? '') . '|' . ($fppStatus['current_song'] ?? '') . '|' . ($bgStatus['currentTrack'] ?? $bgStatus['filename'] ?? '');
-    $announceFile = sys_get_temp_dir() . '/ll_media_announce.json';
+    $announceFile = llGetPlugindataDir() . '/ll_media_announce.json';
+    @mkdir(dirname($announceFile), 0775, true);
     $prev = @json_decode(@file_get_contents($announceFile), true);
     if (!is_array($prev) || ($prev['key'] ?? '') !== $mediaKey) {
         $announcedAtMs = $monoMs;
@@ -1563,14 +1544,14 @@ function llSyncEndpoint() {
         header('Content-Type: application/json');
         return llJson(['success' => false, 'error' => 'MultiSync required for exact frame sync not enabled. Enable MultiSync in FPP Settings.']);
     }
-    // Try C++ plugin's exact sync first (monotonic, frame-exact), then fallback to file/status
-    $syncFile = '/tmp/ll_sync.json';
+    // Try C++ plugin's exact sync first (monotonic, frame-exact), then fallback to file/status (§5 — plugindata, not /tmp)
+    $syncFile = llGetPlugindataDir() . '/ll_sync.json';
     $nowMono = LLSyncTiming::monotonicMs();
     $nowWall = LLSyncTiming::wallClockMs();
-    // Try direct C++ API via fppd (port 32322) — most precise, no file race
+    // Try C++ plugin API via Apache proxy — stable surface (§3.3), most precise
     $cppSync = null;
     if (function_exists('curl_init')) {
-        $ch = curl_init('http://127.0.0.1:32322/ListenLive/sync');
+        $ch = curl_init('http://localhost/api/plugin-apis/ListenLive/sync');
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_TIMEOUT, 1);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 1);
@@ -1587,22 +1568,23 @@ function llSyncEndpoint() {
         $cppSync['source'] = 'c++';
         return llJson($cppSync);
     }
-    // Fallback: file written by C++ (if fppd API not reachable)
-    if (file_exists($syncFile)) {
-        $j = @json_decode(@file_get_contents($syncFile), true);
-        if (is_array($j) && isset($j['media'])) {
-            $j['server_monotonic_ms'] = $nowMono;
-            $j['server_wall_ms'] = $nowWall;
-            $j['source'] = 'file';
-            // Extrapolate if recent
-            if (isset($j['monotonic_ms'], $j['seconds']) && is_numeric($j['monotonic_ms']) && is_numeric($j['seconds']) && $j['seconds'] >= 0) {
-                $delta = ($nowMono - (float)$j['monotonic_ms']) / 1000.0;
-                if ($delta >= 0 && $delta < 2.0) {
-                    $j['extrapolated_seconds'] = (float)$j['seconds'] + $delta;
-                    $j['extrapolated'] = true;
+    // Fallback: file written by C++ (if fppd API not reachable) — plugindata first, then legacy /tmp for migration
+    foreach ([$syncFile, '/tmp/ll_sync.json'] as $sf) {
+        if (file_exists($sf)) {
+            $j = @json_decode(@file_get_contents($sf), true);
+            if (is_array($j) && isset($j['media'])) {
+                $j['server_monotonic_ms'] = $nowMono;
+                $j['server_wall_ms'] = $nowWall;
+                $j['source'] = ($sf === $syncFile) ? 'file' : 'file-legacy';
+                if (isset($j['monotonic_ms'], $j['seconds']) && is_numeric($j['monotonic_ms']) && is_numeric($j['seconds']) && $j['seconds'] >= 0) {
+                    $delta = ($nowMono - (float)$j['monotonic_ms']) / 1000.0;
+                    if ($delta >= 0 && $delta < 2.0) {
+                        $j['extrapolated_seconds'] = (float)$j['seconds'] + $delta;
+                        $j['extrapolated'] = true;
+                    }
                 }
+                return llJson($j);
             }
-            return llJson($j);
         }
     }
     // Final fallback: status poll (int seconds) — not frame-exact
@@ -1644,9 +1626,9 @@ function llClockEndpoint() {
     }
     $nowMono = LLSyncTiming::monotonicMs();
     $nowWall = LLSyncTiming::wallClockMs();
-    // Try C++ clock first
+    // Try C++ clock via Apache proxy — stable surface (§3.3)
     if (function_exists('curl_init')) {
-        $ch = curl_init('http://127.0.0.1:32322/ListenLive/clock');
+        $ch = curl_init('http://localhost/api/plugin-apis/ListenLive/clock');
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_TIMEOUT, 1);
         $tmp = @curl_exec($ch);
@@ -1679,9 +1661,13 @@ function llCheckUpdatesEndpoint() {
 
 function llUpdateEndpoint() {
     $pluginDir = LL_PLUGIN_DIR;
-    $backupDir = sys_get_temp_dir() . '/fpp-ll-update-backup';
-    @mkdir($backupDir, 0777, true);
+    $backupDir = llGetPlugindataDir() . '/tmp_update_backup';
+    @mkdir($backupDir, 0775, true);
     if (file_exists(LL_SETTINGS_FILE)) @copy(LL_SETTINGS_FILE, $backupDir . '/settings.json');
+    // Also backup FPP plugin config store
+    $pluginConfigFile = '';
+    if (isset($GLOBALS['settings']['configDirectory'])) $pluginConfigFile = rtrim($GLOBALS['settings']['configDirectory'], '/') . '/plugin.' . LL_PLUGIN_NAME;
+    if ($pluginConfigFile !== '' && file_exists($pluginConfigFile)) @copy($pluginConfigFile, $backupDir . '/plugin.' . LL_PLUGIN_NAME);
     if (is_dir($pluginDir . '/.git')) {
         exec('git -C ' . escapeshellarg($pluginDir) . ' fetch origin 2>&1');
         exec('git -C ' . escapeshellarg($pluginDir) . ' checkout -- . 2>&1');
@@ -1691,6 +1677,9 @@ function llUpdateEndpoint() {
     if (file_exists($backupDir . '/settings.json')) {
         @mkdir(dirname(LL_SETTINGS_FILE), 0777, true);
         @copy($backupDir . '/settings.json', LL_SETTINGS_FILE);
+    }
+    if (file_exists($backupDir . '/plugin.' . LL_PLUGIN_NAME) && isset($pluginConfigFile) && $pluginConfigFile !== '') {
+        @copy($backupDir . '/plugin.' . LL_PLUGIN_NAME, $pluginConfigFile);
     }
     exec('rm -rf ' . escapeshellarg($backupDir));
     @chmod(LL_PLUGIN_DIR . '/config', 0775);

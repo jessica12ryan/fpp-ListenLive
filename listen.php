@@ -39,13 +39,13 @@ $showDevTab = $uiLevel >= 3;
 .ll-status-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; text-align: left; max-width: 560px; margin: 12px auto; font-size: 14px; }
 .ll-status-grid b { white-space: nowrap; }
 .ll-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
-.ll-badge-live { background: #dc3545; color: #fff; animation: llpulse 1.5s infinite; }
-.ll-badge-idle { background: #6c757d; color: #fff; }
-.ll-badge-warn { background: #ffc107; color: #212529; }
+.ll-badge-live { background: var(--bs-danger); color: var(--bs-white, #fff); animation: llpulse 1.5s infinite; }
+.ll-badge-idle { background: var(--bs-secondary); color: var(--bs-white, #fff); }
+.ll-badge-warn { background: var(--bs-warning); color: var(--bs-dark, #212529); }
 @keyframes llpulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
 .ll-nowplaying { font-size: 16px; font-weight: 600; margin: 8px 0; min-height: 24px; }
 .ll-wave { height: 40px; display: flex; align-items: center; justify-content: center; gap: 3px; margin: 10px 0; }
-.ll-wave span { display: inline-block; width: 4px; height: 12px; background: #0d6efd; border-radius: 2px; animation: llwave 0.8s ease-in-out infinite; }
+.ll-wave span { display: inline-block; width: 4px; height: 12px; background: var(--bs-primary); border-radius: 2px; animation: llwave 0.8s ease-in-out infinite; }
 .ll-wave span:nth-child(2) { animation-delay: 0.1s; }
 .ll-wave span:nth-child(3) { animation-delay: 0.2s; }
 .ll-wave span:nth-child(4) { animation-delay: 0.3s; }
@@ -79,7 +79,7 @@ $showDevTab = $uiLevel >= 3;
                         <span id="ll_time_duration">--:--</span>
                     </div>
                     <div style="height:6px;background:var(--bs-secondary-bg,#e9ecef);border-radius:3px;overflow:hidden;">
-                        <div id="ll_progress" style="height:100%;width:0%;background:#0d6efd;transition:width 0.3s linear;"></div>
+                        <div id="ll_progress" style="height:100%;width:0%;background:var(--bs-primary);transition:width 0.3s linear;"></div>
                     </div>
                     <div id="ll_time_remaining" style="font-size:11px;color:var(--bs-secondary-color,#6c757d);margin-top:2px;"></div>
                 </div>
@@ -99,7 +99,7 @@ $showDevTab = $uiLevel >= 3;
                 <div style="margin:8px auto;max-width:560px;text-align:center;">
                     <label style="font-size:12px;color:var(--bs-secondary-color,#6c757d);"><input type="checkbox" id="ll_exact_toggle" onchange="llExactAudio.toggleAudio(this.checked);" style="vertical-align:middle;margin-right:4px;"> Exact frame sync (Web Audio, versatile)</label>
                     <span id="ll_exact_status" style="font-size:11px;color:var(--bs-secondary-color,#6c757d);margin-left:8px;"></span>
-                    <div id="ll_exact_info" style="font-size:11px;color:#0c5460;background:#d1ecf1;border:1px solid #bee5eb;border-radius:4px;padding:4px 8px;margin-top:6px;display:none;"></div>
+                    <div id="ll_exact_info" class="alert alert-info py-1 px-2 small" style="font-size:11px;margin-top:6px;display:none;" role="alert"></div>
                 </div>
                 <div class="ll-status-grid" id="ll_details">
                     <b>Source:</b> <span id="ll_src">—</span>

@@ -19,9 +19,18 @@ if [ -z "$PLUGIN_DIR" ] || [ ! -d "$(dirname "$PLUGIN_DIR")" ]; then
     PLUGIN_DIR="$(dirname "$SCRIPT_DIR")"
 fi
 
-# --- Preserve user config ---
+# --- Preserve user config (FPP plugin config + legacy JSON) ---
+# Keep backup in plugindata (§5) so it survives git clean and is not in /tmp
+PLUGINDATA_DIR="${MEDIADIR:-/home/fpp/media}/plugindata/fpp-ListenLive"
+mkdir -p "$PLUGINDATA_DIR" 2>/dev/null || true
 if [ -f "${PLUGIN_DIR}/config/settings.json" ]; then
-    cp "${PLUGIN_DIR}/config/settings.json" "/tmp/fpp-ListenLive-settings-backup.json" 2>/dev/null || true
+    cp "${PLUGIN_DIR}/config/settings.json" "$PLUGINDATA_DIR/settings-backup.json" 2>/dev/null || true
+fi
+# Also preserve FPP's own plugin config file if present
+if [ -n "${MEDIADIR:-}" ] && [ -f "${MEDIADIR}/config/plugin.fpp-ListenLive" ]; then
+    cp "${MEDIADIR}/config/plugin.fpp-ListenLive" "$PLUGINDATA_DIR/plugin.fpp-ListenLive.bak" 2>/dev/null || true
+elif [ -f "/home/fpp/media/config/plugin.fpp-ListenLive" ]; then
+    cp "/home/fpp/media/config/plugin.fpp-ListenLive" "$PLUGINDATA_DIR/plugin.fpp-ListenLive.bak" 2>/dev/null || true
 fi
 
 # Self-update from git if available
@@ -40,9 +49,18 @@ if [ -d "${PLUGIN_DIR}/.git" ]; then
 fi
 
 # Restore config
-if [ -f "/tmp/fpp-ListenLive-settings-backup.json" ]; then
+if [ -f "$PLUGINDATA_DIR/settings-backup.json" ]; then
     mkdir -p "${PLUGIN_DIR}/config" 2>/dev/null || true
-    mv "/tmp/fpp-ListenLive-settings-backup.json" "${PLUGIN_DIR}/config/settings.json" 2>/dev/null || true
+    mv "$PLUGINDATA_DIR/settings-backup.json" "${PLUGIN_DIR}/config/settings.json" 2>/dev/null || true
+fi
+if [ -f "$PLUGINDATA_DIR/plugin.fpp-ListenLive.bak" ]; then
+    if [ -n "${MEDIADIR:-}" ] && [ -d "${MEDIADIR}/config" ]; then
+        mv "$PLUGINDATA_DIR/plugin.fpp-ListenLive.bak" "${MEDIADIR}/config/plugin.fpp-ListenLive" 2>/dev/null || true
+    elif [ -d "/home/fpp/media/config" ]; then
+        mv "$PLUGINDATA_DIR/plugin.fpp-ListenLive.bak" "/home/fpp/media/config/plugin.fpp-ListenLive" 2>/dev/null || true
+    else
+        rm -f "$PLUGINDATA_DIR/plugin.fpp-ListenLive.bak" 2>/dev/null || true
+    fi
 fi
 
 # Ensure config exists
@@ -105,7 +123,7 @@ if [ -f "${FPPDIR:-/opt/fpp}/src/Plugin.h" ] && [ -f "${PLUGIN_DIR}/Makefile" ];
         echo "fpp-ListenLive: Native build failed - file-sync fallback will be used. Check /opt/fpp/src exists and build tools are installed (build-essential)."
     fi
 else
-    echo "fpp-ListenLive: Skipping native build (FPP headers not found at ${FPPDIR}/src/Plugin.h) - file-sync fallback will be used."
+    echo "fpp-ListenLive: Skipping native build (FPP headers not found at ${FPPDIR:-/opt/fpp}/src/Plugin.h) - file-sync fallback will be used."
 fi
 
 # Request fppd restart so new native component is picked up. PluginManager only

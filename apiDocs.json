@@ -1,0 +1,56 @@
+{
+  "paths": {
+    "/ListenLive/sync": {
+      "get": {
+        "summary": "Frame-exact sync clock (monotonic) from C++ MultiSync",
+        "description": "Returns current media, seconds, extrapolated_seconds, monotonic_ms, wall_ms, epoch_ms, confidence and playlist state from the C++ MultiSync plugin. Falls back to PHP file/status when fppd API is unreachable. Used by the Listen page's Exact frame sync (AudioContext) to schedule gapless playback.",
+        "responses": {
+          "200": {
+            "description": "Sync state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "has_media": { "type": "boolean" },
+                    "media": { "type": "string" },
+                    "seconds": { "type": "number" },
+                    "extrapolated_seconds": { "type": "number" },
+                    "monotonic_ms": { "type": "integer" },
+                    "wall_ms": { "type": "integer" },
+                    "epoch_ms": { "type": "integer" },
+                    "confidence": { "type": "string" },
+                    "source": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ListenLive/clock": {
+      "get": {
+        "summary": "Monotonic and wall clock",
+        "description": "Returns monotonic_ms, wall_ms and epoch_ms from steady_clock / system_clock. Used to anchor Exact sync without media.",
+        "responses": {
+          "200": {
+            "description": "Clock",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "monotonic_ms": { "type": "integer" },
+                    "wall_ms": { "type": "integer" },
+                    "epoch_ms": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,6 +1,7 @@
 #include "fpp-pch.h"
 
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <iostream>
@@ -25,6 +26,7 @@
 #ifndef PM_HAVE_NOARG_REGISTER_APIS
 using LlHttpResponse = decltype(std::declval<httpserver::http_resource&>().render_GET(
     std::declval<const httpserver::http_request&>()));
+using HttpServerCompat = httpserver::webserver;
 #endif
 
 #define LL_SYNC_PATH "/ListenLive/sync"
@@ -56,6 +58,11 @@ public:
     virtual ~FPPListenLiveSyncPlugin()
     {
         MultiSync::INSTANCE.removeMultiSyncPlugin(this);
+    }
+
+    std::function<bool()> shutdown() override {
+        // No threads/timers/curl to stop — quiesce immediately (§2.9)
+        return nullptr;
     }
 
     // MultiSync callbacks — master clock, exact to FPP's media pipeline
@@ -100,8 +107,7 @@ public:
             m_lastMono = monotonicMs();
             m_lastWall = wallClockMs();
         }
-        // Also persist to tmp file for PHP fallback (no FPP API needed)
-        // Best-effort, no lock needed beyond mutex
+        // Also persist to plugindata for PHP fallback (no fppd API needed) — §5, not /tmp
         Json::Value j;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
@@ -112,15 +118,26 @@ public:
             j["epoch_ms"] = (Json::Int64)m_epochWall;
             j["has_media"] = !m_lastFile.empty() && m_lastSeconds >= 0;
         }
-        // Write atomically via tmp rename
-        FILE *f = fopen("/tmp/ll_sync.json.tmp", "w");
+        // Write atomically via tmp rename into plugindata (FPP rotates /tmp, not plugindata)
+        std::string plugindataDir = getFPPMediaDir("/plugindata/fpp-ListenLive");
+        mkdir(plugindataDir.c_str(), 0775);
+        std::string tmpPath = plugindataDir + "/ll_sync.json.tmp";
+        std::string finalPath = plugindataDir + "/ll_sync.json";
+        FILE *f = fopen(tmpPath.c_str(), "w");
         if (f) {
             Json::StreamWriterBuilder b;
             b["indentation"] = "";
             std::string out = Json::writeString(b, j);
             fwrite(out.c_str(), 1, out.size(), f);
             fclose(f);
-            rename("/tmp/ll_sync.json.tmp", "/tmp/ll_sync.json");
+            rename(tmpPath.c_str(), finalPath.c_str());
+            // Legacy /tmp copy for one-release migration — remove after 2027
+            FILE *lf = fopen("/tmp/ll_sync.json.tmp", "w");
+            if (lf) {
+                fwrite(out.c_str(), 1, out.size(), lf);
+                fclose(lf);
+                rename("/tmp/ll_sync.json.tmp", "/tmp/ll_sync.json");
+            }
         }
     }
 
@@ -161,13 +178,13 @@ public:
 #else
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-    void registerApis(httpserver::webserver* ws) override
+    void registerApis(HttpServerCompat* ws) override
     {
         ws->register_resource(LL_SYNC_PATH, this, false);
         // clock path shares same resource — we use query param ?clock=1
         LogInfo(VB_PLUGIN, "ListenLive sync registered at /api/plugin-apis%s\n", LL_SYNC_PATH);
     }
-    void unregisterApis(httpserver::webserver* ws) override
+    void unregisterApis(HttpServerCompat* ws) override
     {
         ws->unregister_resource(LL_SYNC_PATH);
     }
@@ -268,6 +285,8 @@ private:
     int m_lastPlaylistItem = 0;
     int64_t m_lastPlaylistMono = 0;
 };
+
+FPP_PLUGIN_SUPPORTS_UNLOAD()
 
 extern "C"
 {
