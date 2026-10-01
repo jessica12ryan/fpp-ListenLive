@@ -97,48 +97,42 @@ public:
 
     virtual void SendMediaSyncPacket(const std::string &filename, float seconds) override
     {
-        int curHalf = static_cast<int>(seconds * 2.0f);
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_lastMediaHalf == curHalf && m_lastFile == filename) return;
-            m_lastMediaHalf = curHalf;
-            m_lastFile = filename;
-            m_lastSeconds = seconds;
-            m_lastMono = monotonicMs();
-            m_lastWall = wallClockMs();
-        }
-        // Also persist to plugindata for PHP fallback (no fppd API needed) — §5, not /tmp
-        Json::Value j;
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            j["media"] = m_lastFile;
-            j["seconds"] = m_lastSeconds;
-            j["monotonic_ms"] = (Json::Int64)m_lastMono;
-            j["wall_ms"] = (Json::Int64)m_lastWall;
-            j["epoch_ms"] = (Json::Int64)m_epochWall;
-            j["has_media"] = !m_lastFile.empty() && m_lastSeconds >= 0;
-        }
-        // Write atomically via tmp rename into plugindata (FPP rotates /tmp, not plugindata)
-        std::string plugindataDir = getFPPMediaDir("/plugindata/fpp-ListenLive");
-        mkdir(plugindataDir.c_str(), 0775);
-        std::string tmpPath = plugindataDir + "/ll_sync.json.tmp";
-        std::string finalPath = plugindataDir + "/ll_sync.json";
-        FILE *f = fopen(tmpPath.c_str(), "w");
-        if (f) {
-            Json::StreamWriterBuilder b;
-            b["indentation"] = "";
-            std::string out = Json::writeString(b, j);
-            fwrite(out.c_str(), 1, out.size(), f);
-            fclose(f);
-            rename(tmpPath.c_str(), finalPath.c_str());
-            // Legacy /tmp copy for one-release migration — remove after 2027
-            FILE *lf = fopen("/tmp/ll_sync.json.tmp", "w");
-            if (lf) {
-                fwrite(out.c_str(), 1, out.size(), lf);
-                fclose(lf);
-                rename("/tmp/ll_sync.json.tmp", "/tmp/ll_sync.json");
-            }
-        }
+        recordSync(filename, seconds);
+    }
+
+    // Remote side: when this FPP is a MultiSync remote, fppd drives the
+    // Received* callbacks from the master's UDP packets. Without these, sync
+    // state (and ll_sync.json + /sync API) never updates on remotes — the
+    // plugin only worked on the player. Mirror into the same state/file.
+    virtual void ReceivedMediaOpenPacket(const std::string &filename) override
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_lastFileOpen = filename;
+        m_lastOpenMono = monotonicMs();
+    }
+
+    virtual void ReceivedMediaSyncStartPacket(const std::string &filename) override
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_lastFile = filename;
+        m_lastSeconds = 0.0f;
+        m_lastMono = monotonicMs();
+        m_lastWall = wallClockMs();
+        m_lastMediaHalf = 0;
+    }
+
+    virtual void ReceivedMediaSyncStopPacket(const std::string &filename) override
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_lastFile = "";
+        m_lastSeconds = -1.0f;
+        m_lastMono = monotonicMs();
+        m_lastWall = wallClockMs();
+    }
+
+    virtual void ReceivedMediaSyncPacket(const std::string &filename, float seconds) override
+    {
+        recordSync(filename, seconds);
     }
 
     virtual void playlistCallback(const Json::Value& playlist, const std::string& action, const std::string& section, int item) override
@@ -254,6 +248,53 @@ private:
         Json::StreamWriterBuilder b;
         b["indentation"] = "";
         return Json::writeString(b, j);
+    }
+
+    // Shared by Send* (player) and Received* (remote) media sync paths:
+    // half-second dedup, state update, then atomic persist to plugindata
+    // for the PHP fallback (no fppd API needed). Plugindata only — never
+    // /tmp (FPP rotates /tmp; policy §5).
+    void recordSync(const std::string &filename, float seconds)
+    {
+        int curHalf = static_cast<int>(seconds * 2.0f);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_lastMediaHalf == curHalf && m_lastFile == filename) return;
+            m_lastMediaHalf = curHalf;
+            m_lastFile = filename;
+            m_lastSeconds = seconds;
+            m_lastMono = monotonicMs();
+            m_lastWall = wallClockMs();
+        }
+        persistSync();
+    }
+
+    void persistSync()
+    {
+        Json::Value j;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            j["media"] = m_lastFile;
+            j["seconds"] = m_lastSeconds;
+            j["monotonic_ms"] = (Json::Int64)m_lastMono;
+            j["wall_ms"] = (Json::Int64)m_lastWall;
+            j["epoch_ms"] = (Json::Int64)m_epochWall;
+            j["has_media"] = !m_lastFile.empty() && m_lastSeconds >= 0;
+        }
+        // Write atomically via tmp rename into plugindata
+        std::string plugindataDir = getFPPMediaDir("/plugindata/fpp-ListenLive");
+        mkdir(plugindataDir.c_str(), 0775);
+        std::string tmpPath = plugindataDir + "/ll_sync.json.tmp";
+        std::string finalPath = plugindataDir + "/ll_sync.json";
+        FILE *f = fopen(tmpPath.c_str(), "w");
+        if (f) {
+            Json::StreamWriterBuilder b;
+            b["indentation"] = "";
+            std::string out = Json::writeString(b, j);
+            fwrite(out.c_str(), 1, out.size(), f);
+            fclose(f);
+            rename(tmpPath.c_str(), finalPath.c_str());
+        }
     }
 
     static int64_t monotonicMs()

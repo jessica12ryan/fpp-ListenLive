@@ -158,14 +158,16 @@ function llDetectAudioSources() {
         $result['ffmpeg_pipewire'] = true;
     }
     // PipeWire detection — FPP 9+ uses PipeWire, pactl is pipewire-pulse compat
-    // Try FPP's own PipeWire API first (most reliable on FPP)
+    // Try FPP's own PipeWire API first (most reliable on FPP).
+    // Real FPP 10 routes (www/api/controllers/pipewire.php): groups, sinks,
+    // cards. There is no /audio/sources or /audio/plugin-sources route.
     $pipewireApiUrls = [
-        'http://localhost/api/pipewire/audio/sources',
-        'http://127.0.0.1/api/pipewire/audio/sources',
-        'http://localhost/api/pipewire/audio/plugin-sources',
-        'http://127.0.0.1/api/pipewire/audio/plugin-sources',
         'http://localhost/api/pipewire/audio/sinks',
         'http://127.0.0.1/api/pipewire/audio/sinks',
+        'http://localhost/api/pipewire/audio/cards',
+        'http://127.0.0.1/api/pipewire/audio/cards',
+        'http://localhost/api/pipewire/audio/groups',
+        'http://127.0.0.1/api/pipewire/audio/groups',
     ];
     foreach ($pipewireApiUrls as $url) {
         $json = null;
@@ -187,19 +189,31 @@ function llDetectAudioSources() {
             $data = json_decode($json, true);
             if (is_array($data) && !empty($data)) {
                 $result['pipewire'] = true;
-                // Flatten any source names
-                foreach ($data as $item) {
+                // Sinks: [{name:...}] — monitor source is <sink>.monitor
+                // Cards: [{id/name/...}] — informational only
+                // Groups: {"groups":[{name,...}]} — FPP10 combine sinks fpp_group_*
+                $items = $data;
+                if (isset($data['groups']) && is_array($data['groups'])) {
+                    $items = $data['groups'];
+                }
+                foreach ($items as $item) {
                     if (is_string($item)) $result['pipewire_sources'][] = $item;
-                    elseif (is_array($item) && isset($item['name'])) $result['pipewire_sources'][] = $item['name'];
+                    elseif (is_array($item) && isset($item['name'])) {
+                        $result['pipewire_sources'][] = $item['name'];
+                        // A sink implies its .monitor source for capture
+                        if (strpos($url, '/sinks') !== false && strpos($item['name'], '.monitor') === false) {
+                            $result['pipewire_sources'][] = $item['name'] . '.monitor';
+                        }
+                    }
                     elseif (is_array($item) && isset($item['nodeName'])) $result['pipewire_sources'][] = $item['nodeName'];
                 }
-                break;
+                if (!empty($result['pipewire_sources'])) break;
             }
         }
     }
-    // Fallback: check pipewire runtime / tools
+    // Fallback: check pipewire runtime / tools (FPP10 socket lives at /run/pipewire-fpp)
     if (!$result['pipewire']) {
-        $pwCheck = @shell_exec('which pw-cli 2>/dev/null; which wpctl 2>/dev/null; ls /run/user/*/pipewire-0 2>/dev/null | head -1');
+        $pwCheck = @shell_exec('which pw-cli 2>/dev/null; which wpctl 2>/dev/null; ls /run/pipewire-fpp/pipewire-0 /run/user/*/pipewire-0 2>/dev/null | head -2');
         if ($pwCheck && (strpos($pwCheck, 'pw-cli') !== false || strpos($pwCheck, 'wpctl') !== false || strpos($pwCheck, 'pipewire-0') !== false)) {
             $result['pipewire'] = true;
         }
@@ -278,19 +292,17 @@ function llDetectAudioSources() {
     $result['pulse_sources'] = array_values(array_unique($result['pulse_sources']));
     $result['pipewire_sources'] = array_values(array_unique($result['pipewire_sources']));
     $result['alsa_devices'] = array_values(array_unique($result['alsa_devices']));
-    // PipeWire required for exact (fpp_group_default) — not just any backend
+    // liveAvailable: ffmpeg plus ANY capture backend (pipewire preferred,
+    // pulse/alsa acceptable). FPP10 group sinks are fpp_group_* (not only
+    // fpp_group_default), so match the prefix. Never block file-sync on this.
     $hasFppGroup = false;
     foreach ($result['pipewire_sources'] as $s) {
-        if (strpos($s, 'fpp_group_default') !== false) $hasFppGroup = true;
+        if (strpos($s, 'fpp_group_') !== false) { $hasFppGroup = true; break; }
     }
-    if (!$hasFppGroup) {
-        // Also check ffmpeg fallback sources for fpp_group_default (seen on this host)
-        $hasFppGroup = true; // Pi's pipewire may not list via API but still works via fpp_group_default.monitor
-        // We still require pipewire true, but don't fail if fpp_group_default not in list —
-        // the actual capture tries fpp_group_default.monitor first, so liveAvailable true if pipewire
-    }
-    $result['liveAvailable'] = $result['ffmpeg'] && $result['pipewire'] && $hasFppGroup;
-    $result['pipewire_required'] = true;
+    $result['has_fpp_group'] = $hasFppGroup;
+    $result['liveAvailable'] = $result['ffmpeg'] && ($result['pipewire'] || $result['pulse'] || $result['alsa']);
+    $result['exactAvailable'] = $result['ffmpeg'] && $result['pipewire'] && $hasFppGroup;
+    $result['pipewire_required'] = false;
     return $result;
 }
 
@@ -327,50 +339,33 @@ function llGetFppStatus() {
 }
 
 
-function llGetMultisyncElapsed() {
-    // Try to get multisync master elapsed for show sync
-    // FPP remotes sync to master via multisync; master time is authoritative
-    // Check common multisync endpoints and status fields
-    $candidates = [
-        'http://localhost/api/fppd/multisync',
-        'http://127.0.0.1/api/fppd/multisync',
-        'http://localhost/api/system/multisync',
-        'http://127.0.0.1/api/system/multisync',
-        'http://localhost/api/multisync/status',
-    ];
-    foreach ($candidates as $url) {
-        $json = null;
-        if (function_exists('curl_init')) {
-            $ch = curl_init($url);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_TIMEOUT, 2);
-            $tmp = @curl_exec($ch);
-            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            if ($tmp !== false && $code === 200 && $tmp !== '' && $tmp[0] === '{') $json = $tmp;
-        } else {
-            $ctx = stream_context_create(['http' => ['timeout' => 2]]);
-            $tmp = @file_get_contents($url, false, $ctx);
-            if ($tmp !== false && $tmp !== '' && $tmp[0] === '{') $json = $tmp;
+function llGetMultisyncElapsed($preFetchedStatus = null) {
+    // FPP remotes sync to master via multisync UDP packets; fppd applies them
+    // to its own playback position, so /api/fppd/status seconds_elapsed (+
+    // milliseconds_elapsed for sub-second precision) IS the multisync-aware
+    // clock on both player and remote. There is no separate HTTP
+    // "multisync elapsed" route in FPP, so the old candidate URL probes only
+    // added latency and always missed. Derive from status.
+    // $preFetchedStatus avoids a second HTTP call when the caller already has it.
+    // NOTE: no HTTP probes here — see function header. Status is authoritative.
+    $status = $preFetchedStatus !== null ? $preFetchedStatus : llGetFppStatus();
+    if (is_array($status)) {
+        // Some FPP versions embed master info under 'multisync' as an array
+        if (isset($status['multisync']) && is_array($status['multisync'])) {
+            foreach (['elapsed','seconds_elapsed','masterElapsed'] as $k) {
+                if (isset($status['multisync'][$k]) && is_numeric($status['multisync'][$k])) return (float)$status['multisync'][$k];
+            }
         }
-        if ($json) {
-            $data = json_decode($json, true);
-            if (is_array($data)) {
-                // Look for elapsed fields in various possible structures
-                foreach (['elapsed','seconds_elapsed','time_elapsed','masterElapsed','position'] as $k) {
-                    if (isset($data[$k]) && is_numeric($data[$k])) return (float)$data[$k];
-                    if (isset($data['master'][$k]) && is_numeric($data['master'][$k])) return (float)$data['master'][$k];
+        // Prefer sub-second precision when fppd provides it
+        if (isset($status['seconds_elapsed']) && is_numeric($status['seconds_elapsed'])) {
+            $elapsed = (float)$status['seconds_elapsed'];
+            if (isset($status['milliseconds_elapsed']) && is_numeric($status['milliseconds_elapsed'])) {
+                $ms = (float)$status['milliseconds_elapsed'];
+                if ($ms >= $elapsed * 1000 - 1500 && $ms <= $elapsed * 1000 + 1500) {
+                    return $ms / 1000.0;
                 }
             }
-        }
-    }
-    // Also check FPP status for multisync field (some versions embed master info)
-    $status = llGetFppStatus();
-    if ($status && isset($status['multisync'])) {
-        $ms = $status['multisync'];
-        if (is_array($ms)) {
-            foreach (['elapsed','seconds_elapsed','masterElapsed'] as $k) {
-                if (isset($ms[$k]) && is_numeric($ms[$k])) return (float)$ms[$k];
-            }
+            return $elapsed;
         }
     }
     return null;
@@ -873,8 +868,10 @@ function llStreamEndpoint() {
         return llJson(['success' => false, 'error' => 'Listen Live is disabled in plugin settings. Enable it in Content Setup → Listen Live → Config.']);
     }
 
-    // Per latest user request: file-based playback synced to FPP multisync + BackgroundMusic
-    // Try file-sync first (most reliable for staying in sync), live capture as fallback
+    // File-sync first (most reliable for staying in sync), live capture as fallback.
+    // Neither PipeWire nor MultiSync may gate the stream: file-sync works
+    // without either, and live capture works on pulse/alsa too. Sync precision
+    // degrades gracefully (exact -> fallback) instead of 503.
     $detection = llDetectAudioSources();
     $ffmpeg = $detection['ffmpeg'];
     if (!$ffmpeg) {
@@ -883,31 +880,12 @@ function llStreamEndpoint() {
         llLog('Stream unavailable: ffmpeg not found');
         return llJson(['success' => false, 'error' => 'FFmpeg not found. Install ffmpeg (sudo apt install ffmpeg).']);
     }
-    if (empty($detection['pipewire']) || empty($detection['liveAvailable'])) {
-        header('HTTP/1.1 503 Service Unavailable');
-        header('Content-Type: application/json');
-        llLog('Stream unavailable: PipeWire required for exact (fpp_group_default) not found');
-        return llJson(['success' => false, 'error' => 'PipeWire required for exact frame sync (fpp_group_default) not found. Ensure FPP 9+ with pipewire and FPP audio via pipewiresink. Check Diagnostics.']);
-    }
-    // MultiSync required for exact — versatile single/multi, master clock
-    $fppStatusTmp = llGetFppStatus();
-    if ($fppStatusTmp !== null && isset($fppStatusTmp['multisync']) && !$fppStatusTmp['multisync']) {
-        header('HTTP/1.1 503 Service Unavailable');
-        header('Content-Type: application/json');
-        llLog('Stream unavailable: MultiSync required for exact frame sync not enabled');
-        return llJson(['success' => false, 'error' => 'MultiSync required for exact frame sync not enabled. Enable MultiSync in FPP Settings → MultiSync (Player/Remote) for versatile exact across single/multi.']);
-    }
-    // Strictly file sync per user request — no OS-level fallback
     $preFallback = llGetFallbackMedia();
     if ($preFallback && (!empty($preFallback['path']) || !empty($preFallback['streamUrl']))) {
         llLog('Stream: file-sync for ' . $preFallback['type'] . ' - ' . $preFallback['media']);
         return llStreamFileSync(false);
     }
-    header('HTTP/1.1 503 Service Unavailable');
-    header('Content-Type: application/json');
-    llLog('Stream unavailable: no file to sync (strict file-sync, no live fallback)');
-    return llJson(['success' => false, 'error' => 'Stream unavailable — no media file currently playing. Start a playlist or background music. File sync is strictly used per user request.']);
-    // Live capture fallback disabled per user request — code below is unreachable but kept for reference
+    // No file to sync — fall through to live capture probe below.
     // Probe live capture candidates WITHOUT sending headers yet — find first that yields data
     // Use proc_open to capture stderr for detailed logging when probe fails
     $cmds = llBuildFfmpegCommand($settings, $detection);
@@ -1060,7 +1038,8 @@ function llStreamEndpoint() {
             }
             proc_close($proc);
             llLog('Stream ended live: ' . $label . ' eof=' . ($eof?1:0) . ' aborted=' . ($aborted?1:0) . ' status=' . connection_status() . ' exit=' . $exitCode);
-            // Fallback is disabled per user request — just exit, don't try file sync
+            // Live source ended (device closed / track gap) — exit so the
+            // client reconnects and is routed to the current source again.
             exit;
         } else {
             pclose($handle);
@@ -1069,20 +1048,20 @@ function llStreamEndpoint() {
         }
     }
 
-    // If live capture produced only silence, treat as failure and try next candidate
-    // Check captured buffer for actual audio vs silence by looking at MP3 frame energy
-    // Simple heuristic: silence MP3 at 128k for 1.2s should still be ~15k, but we can check for non-zero payload
-    // For now, also try to verify via volumedetect if ffmpeg is available
-    // Live capture failed for all candidates — no fallback per user request
-    llLog('Stream live capture failed for all candidates — no fallback, stream unavailable');
+    // Live capture failed for all candidates — file-sync was already tried
+    // above (or no file was playing), so nothing is streamable right now.
+    llLog('Stream live capture failed for all candidates — no file to sync and no live source, stream unavailable');
     header('HTTP/1.1 503 Service Unavailable');
     header('Content-Type: application/json');
     $hint = 'Live capture failed. Tried: ' . implode(', ', array_map(fn($c)=>$c[1], $cmds));
+    if (empty($cmds)) {
+        $hint = "Source mode '" . ($settings['source'] ?? 'auto') . "' produced no capture candidates and no file is playing.";
+    }
     if (!$detection['pipewire'] && !$detection['pulse'] && !$detection['alsa']) {
         $hint .= ' — no capture devices detected. Ensure PipeWire/Pulse is running and FPP audio is configured.';
     }
-    // Include hint about fallback being disabled
-    return llJson(['success' => false, 'error' => 'Stream unavailable — live capture failed and fallback is disabled.', 'details' => $hint, 'hint' => 'What is outputted from FPP is what should be played. Check Diagnostics tab for capture devices.']);
+    // File-sync (tried first) and live capture (tried above) both unavailable.
+    return llJson(['success' => false, 'error' => 'Stream unavailable — no media file playing and live capture failed.', 'details' => $hint, 'hint' => 'Start a playlist or background music, or check Diagnostics tab for capture devices.']);
 }
 
 function llStreamFileSync($isExplicitFileMode) {
@@ -1102,9 +1081,8 @@ function llStreamFileSync($isExplicitFileMode) {
         $fresh = llGetFppStatus();
         if ($fresh && isset($fresh['seconds_elapsed'])) {
             $elapsed = (float)$fresh['seconds_elapsed'];
-            // If FPP is MultiSync remote, try to get master time via /api/multisync/status
-            // Master time is more authoritative for show sync
-            $msElapsed = llGetMultisyncElapsed();
+            // Multisync-aware elapsed from the same fresh status (no extra HTTP)
+            $msElapsed = llGetMultisyncElapsed($fresh);
             if ($msElapsed !== null) $elapsed = $msElapsed;
         }
     }
@@ -1386,8 +1364,9 @@ function llMediaStreamEndpoint() {
     if ($seek > 0 || $duration > 0) {
         $ffmpeg = llFindFfmpeg();
         $durArg = $duration > 0 ? ' -t ' . escapeshellarg((string)$duration) : '';
-        // Use accurate seek after -i for exact frame, with -copytb 1 for gapless
-        $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . (int)$seek . ' -i ' . escapeshellarg($path) . $durArg . ' -codec:a libmp3lame -b:a 128k -write_xing 0 -id3v2_version 0 -f mp3 -';
+        // Input seek (-ss before -i) is fast and honors fractional seconds;
+        // truncating to int threw away up to 999ms of frame-exact precision.
+        $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg(sprintf('%.3f', max(0, $seek))) . ' -i ' . escapeshellarg($path) . $durArg . ' -codec:a libmp3lame -b:a 128k -write_xing 0 -id3v2_version 0 -f mp3 -';
         header('Content-Type: audio/mpeg');
         llHeaderRemove('Content-Length');
         header('Cache-Control: no-cache');
@@ -1510,7 +1489,7 @@ function llIconEndpoint() {
 }
 
 function llLogsEndpoint() {
-    $logFile = LL_LOG_FILE;
+    $logFile = llGetLogFile();
     if (!file_exists($logFile)) return llJson(['success' => true, 'entries' => []]);
     $fileLines = file($logFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     if ($fileLines === false) return llJson(['success' => false, 'error' => 'Could not read log file.']);
@@ -1532,18 +1511,8 @@ function llLogsEndpoint() {
 }
 
 function llSyncEndpoint() {
-    $det = llDetectAudioSources();
-    if (empty($det['pipewire']) || empty($det['liveAvailable'])) {
-        header('HTTP/1.1 503 Service Unavailable');
-        header('Content-Type: application/json');
-        return llJson(['success' => false, 'error' => 'PipeWire required for exact frame sync not available (fpp_group_default).']);
-    }
-    $fppTmp = llGetFppStatus();
-    if ($fppTmp !== null && isset($fppTmp['multisync']) && !$fppTmp['multisync']) {
-        header('HTTP/1.1 503 Service Unavailable');
-        header('Content-Type: application/json');
-        return llJson(['success' => false, 'error' => 'MultiSync required for exact frame sync not enabled. Enable MultiSync in FPP Settings.']);
-    }
+    // Never 503 here: sync precision degrades (c++ -> file -> status poll)
+    // instead of failing. JS polls this every 200ms; a 503 breaks exact sync.
     // Try C++ plugin's exact sync first (monotonic, frame-exact), then fallback to file/status (§5 — plugindata, not /tmp)
     $syncFile = llGetPlugindataDir() . '/ll_sync.json';
     $nowMono = LLSyncTiming::monotonicMs();
@@ -1612,18 +1581,7 @@ function llSyncEndpoint() {
 }
 
 function llClockEndpoint() {
-    $det = llDetectAudioSources();
-    if (empty($det['pipewire']) || empty($det['liveAvailable'])) {
-        header('HTTP/1.1 503 Service Unavailable');
-        header('Content-Type: application/json');
-        return llJson(['success' => false, 'error' => 'PipeWire required for exact frame sync not available.']);
-    }
-    $fppTmp = llGetFppStatus();
-    if ($fppTmp !== null && isset($fppTmp['multisync']) && !$fppTmp['multisync']) {
-        header('HTTP/1.1 503 Service Unavailable');
-        header('Content-Type: application/json');
-        return llJson(['success' => false, 'error' => 'MultiSync required for exact frame sync not enabled.']);
-    }
+    // Never 503: clock is always answerable from PHP time.
     $nowMono = LLSyncTiming::monotonicMs();
     $nowWall = LLSyncTiming::wallClockMs();
     // Try C++ clock via Apache proxy — stable surface (§3.3)

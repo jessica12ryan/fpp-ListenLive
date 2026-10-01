@@ -9,9 +9,8 @@
  * #############################################################
  */
 $llPluginDir = __DIR__;
-$llSettingsFile = $llPluginDir . '/config/settings.json';
-$llSettings = [];
-if (file_exists($llSettingsFile)) $llSettings = json_decode(@file_get_contents($llSettingsFile), true) ?: [];
+require_once $llPluginDir . '/ui_settings.php';
+$llSettings = llUISettings();
 $enabled = !empty($llSettings['enabled']) ? 1 : 0;
 // Preserve FPP global $settings for tab visibility
 $_fppUiLevel = (int)($GLOBALS['settings']['uiLevel'] ?? $settings['uiLevel'] ?? 0);

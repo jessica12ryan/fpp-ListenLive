@@ -9,11 +9,8 @@
  * #############################################################
  */
 $llPluginDir = __DIR__;
-$llSettingsFile = $llPluginDir . '/config/settings.json';
-$llSettings = [];
-if (file_exists($llSettingsFile)) {
-    $llSettings = json_decode(@file_get_contents($llSettingsFile), true) ?: [];
-}
+require_once $llPluginDir . '/ui_settings.php';
+$llSettings = llUISettings();
 $enabled = !empty($llSettings['enabled']) ? 1 : 0;
 // Preserve FPP global $settings for UI level detection — do not overwrite it
 // FPP sets $settings from /home/fpp/media/settings; use that for tab visibility
@@ -351,20 +348,38 @@ var llExactAudio = {
     start: function() {
         if (!this.useAudio || !llPlayer.isPlaying) return;
         if (!window.AudioContext) return;
+        // Idempotent: 'playing' events + reconnect timers can both call us
+        var nowMs = Date.now();
+        if (this.ctx && this.startedAt && (nowMs - this.startedAt) < 1500) return;
         if (this.ctx) try { this.ctx.close(); } catch(e) {}
+        this.startedAt = nowMs;
         this.ctx = new (window.AudioContext || window.webkitAudioContext)({latencyHint: 'interactive'});
+        // Single audible output: WebAudio owns the sound, native <audio> stays
+        // muted as a silent keepalive/fallback (play() relies on its events).
+        // Route chunks through a gain node so volume/mute keep working.
+        this.gain = this.ctx.createGain();
+        this.gain.connect(this.ctx.destination);
+        this.applyGain();
         this.nextStart = this.ctx.currentTime + 0.4;
         this.queue = [];
         this.fetching = false;
         this.lastMedia = null;
-        // Keep native audible — exact frames via AudioContext, not muted (versatile)
-        try { llPlayer.audio.muted = llPlayer.isMuted; } catch(e) {}
+        try { llPlayer.audio.muted = true; } catch(e) {}
         this.schedule();
+    },
+    applyGain: function() {
+        if (!this.gain || !this.ctx) return;
+        try {
+            var v = parseInt(document.getElementById('ll_vol').value, 10);
+            if (isNaN(v)) v = 80;
+            this.gain.gain.setTargetAtTime(llPlayer.isMuted ? 0 : v / 100, this.ctx.currentTime, 0.02);
+        } catch(e) {}
     },
     stop: function() {
         this.fetching = false;
         this.queue = [];
         if (this.ctx) { try { this.ctx.close(); } catch(e) {} this.ctx = null; }
+        this.gain = null;
         try { llPlayer.audio.muted = llPlayer.isMuted; } catch(e) {}
         // Reset native playbackRate
         try { if (llPlayer.audio) llPlayer.audio.playbackRate = 1.0; } catch(e) {}
@@ -442,7 +457,7 @@ var llExactAudio = {
                 if (!self.ctx || self.ctx.state === 'closed') throw new Error('ctx closed');
                 var src = self.ctx.createBufferSource();
                 src.buffer = decoded;
-                src.connect(self.ctx.destination);
+                src.connect(self.gain || self.ctx.destination);
                 // Exact <250ms: schedule at master time, not nextStart gapless
                 var when = self.ctx.currentTime + 0.08 + (master - seek);
                 // But keep gapless: if nextStart is ahead, start there for gapless, else exact
@@ -692,14 +707,21 @@ var llPlayer = {
         var a = llPlayer.audio;
         llPlayer.isPlaying = true;
         $('#ll_status_text').html('<span class="text-success">Connecting...</span>');
-        // AudioContext exact takes over — mute native and let it schedule
+        // AudioContext exact takes over — mute native and let it schedule.
+        // Native stays a muted keepalive; the 'playing' event kicks off
+        // llExactAudio.start(). Must resume native when paused, or no
+        // 'playing' event fires and WebAudio never starts (Pause→Play).
         if (llExactAudio.useAudio) {
             try { a.muted = true; } catch(e) {}
-            // Still set native src as fallback, but muted
             if (!a.src || a.src === window.location.href) {
                 a.src = llPlayer.buildUrl();
                 a.load();
                 var p2 = a.play(); if (p2 && p2.catch) p2.catch(function(){});
+            } else if (a.paused) {
+                var p3 = a.play(); if (p3 && p3.catch) p3.catch(function(){});
+            } else if (!llExactAudio.ctx) {
+                // Already playing but exact engine gone (e.g. after error) — start now
+                llExactAudio.start();
             }
             llPlayer.initialConnect = true;
             clearTimeout(llPlayer.initialConnectTimer);
@@ -759,6 +781,13 @@ var llPlayer = {
         if (llExactAudio.useAudio) {
             $('#ll_status_text').html('<span class="text-warning">Re-syncing (AudioContext)...</span>');
             llPlayer.isPlaying = true;
+            // Refresh the muted native keepalive too so it stays warm
+            try {
+                llPlayer.audio.muted = true;
+                llPlayer.audio.src = llPlayer.buildUrl();
+                llPlayer.audio.load();
+                var rp = llPlayer.audio.play(); if (rp && rp.catch) rp.catch(function(){});
+            } catch(e) {}
             setTimeout(function(){ if (llPlayer.isPlaying) llExactAudio.start(); }, 300);
             return;
         }
@@ -782,20 +811,26 @@ var llPlayer = {
             llPlayer.isMuted = false;
             $('#ll_mute_btn').val('Mute');
         }
+        try { if (llExactAudio.gain) llExactAudio.applyGain(); } catch(e) {}
     },
 
     toggleMute: function() {
         if (llPlayer.isMuted) {
-            llPlayer.audio.muted = false;
             llPlayer.isMuted = false;
             $('#ll_mute_btn').val('Mute');
             var v = document.getElementById('ll_vol').value;
             llPlayer.audio.volume = v / 100;
+            // WebAudio owns output when active — keep native muted, raise gain
+            if (!(llExactAudio.useAudio && llExactAudio.gain)) {
+                llPlayer.audio.muted = false;
+            }
+            try { if (llExactAudio.gain) llExactAudio.applyGain(); } catch(e) {}
         } else {
             llPlayer.preMuteVol = document.getElementById('ll_vol').value;
-            llPlayer.audio.muted = true;
             llPlayer.isMuted = true;
             $('#ll_mute_btn').val('Unmute');
+            try { if (llExactAudio.gain) llExactAudio.applyGain(); } catch(e) {}
+            if (!llExactAudio.gain) { llPlayer.audio.muted = true; }
         }
     },
 

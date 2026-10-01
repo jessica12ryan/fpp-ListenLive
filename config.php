@@ -9,23 +9,8 @@
  * #############################################################
  */
 $llPluginDir = __DIR__;
-$llSettingsFile = $llPluginDir . '/config/settings.json';
-
-$defaults = [
-    'enabled' => 1,
-    'source' => 'auto',
-    'bitrate' => '128k',
-    'sample_rate' => 44100,
-    'channels' => 2,
-    'alsa_device' => 'default',
-    'pulse_source' => 'auto',
-    'volume' => 100
-];
-$llSettings = $defaults;
-if (file_exists($llSettingsFile)) {
-    $s = json_decode(@file_get_contents($llSettingsFile), true);
-    if (is_array($s)) $llSettings = array_merge($defaults, $s);
-}
+require_once $llPluginDir . '/ui_settings.php';
+$llSettings = llUISettings();
 // Do NOT overwrite FPP global $settings — keep it for UI level detection
 // Tabs.inc will read $GLOBALS['settings']['uiLevel'] correctly
 $_fppUiLevel = (int)($GLOBALS['settings']['uiLevel'] ?? 0);
@@ -35,9 +20,6 @@ if ($_fppUiLevel === 0 && isset($settings['uiLevel'])) {
 $uiLevel = $_fppUiLevel;
 $showLogsTab = $uiLevel >= 1;
 $showDevTab = $uiLevel >= 3;
-// Provide $settings alias for existing HTML that expects plugin settings in $settings
-// But also keep $llSettings authoritative; HTML below will be updated to use $llSettings
-$settings = $llSettings;
 ?>
 <style>
 @media only screen and (max-width: 480px) {
@@ -59,7 +41,7 @@ $settings = $llSettings;
                 <tr>
                     <td style="padding: 4px;"><b>Enable Live Streaming:</b></td>
                     <td style="padding: 4px;">
-                        <input type="checkbox" id="ll_enabled" <?php echo !empty($settings['enabled']) ? 'checked' : ''; ?>>
+                        <input type="checkbox" id="ll_enabled" <?php echo !empty($llSettings['enabled']) ? 'checked' : ''; ?>>
                         <span id="ll_enabled_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="When enabled, FPP captures its live audio output and streams it to your browser via api/plugin/fpp-ListenLive/stream as audio/mpeg. When disabled, that endpoint returns HTTP 503 Service Unavailable and the player shows &quot;Listen Live is disabled.&quot;"><img id="ll_enabled_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span>
                     </td>
                 </tr>
@@ -67,26 +49,26 @@ $settings = $llSettings;
                     <td style="padding: 4px;"><b>Audio Source:</b></td>
                     <td style="padding: 4px;">
                         <select id="ll_source">
-                            <option value="auto" <?php echo ($settings['source']==='auto'?'selected':''); ?>>Auto (try Pulse → ALSA)</option>
-                            <option value="pulse" <?php echo ($settings['source']==='pulse'?'selected':''); ?>>PulseAudio only</option>
-                            <option value="alsa" <?php echo ($settings['source']==='alsa'?'selected':''); ?>>ALSA only</option>
-                            <option value="file" <?php echo ($settings['source']==='file'?'selected':''); ?>>File Sync (stream media file)</option>
+                            <option value="auto" <?php echo ($llSettings['source']==='auto'?'selected':''); ?>>Auto (try Pulse → ALSA)</option>
+                            <option value="pulse" <?php echo ($llSettings['source']==='pulse'?'selected':''); ?>>PulseAudio only</option>
+                            <option value="alsa" <?php echo ($llSettings['source']==='alsa'?'selected':''); ?>>ALSA only</option>
+                            <option value="file" <?php echo ($llSettings['source']==='file'?'selected':''); ?>>File Sync (stream media file)</option>
                         </select>
                         <span id="ll_source_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="How FPP&#39;s audio is captured. Auto (recommended) tries PipeWire/PulseAudio monitor sources first — exact copy of what the audience hears, including sequences, media and effects — then falls back to ALSA loopback. Choose PulseAudio only or ALSA only to force a backend, or File Sync to stream the current media file directly (seeks to elapsed position)."><img id="ll_source_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span>
                     </td>
                 </tr>
-                <tr id="row_pulse" style="<?php echo $settings['source']==='alsa' ? 'display:none;' : ''; ?>">
+                <tr id="row_pulse" style="<?php echo $llSettings['source']==='alsa' ? 'display:none;' : ''; ?>">
                     <td style="padding: 4px;"><b>Pulse Source:</b></td>
                     <td style="padding: 4px;">
-                        <input type="text" id="ll_pulse_source" size="30" value="<?php echo htmlspecialchars($settings['pulse_source'] ?? 'auto'); ?>" placeholder="auto">
+                        <input type="text" id="ll_pulse_source" size="30" value="<?php echo htmlspecialchars($llSettings['pulse_source'] ?? 'auto'); ?>" placeholder="auto">
                         <span id="ll_pulse_source_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="PipeWire/PulseAudio source to capture. Use &quot;auto&quot; to let the plugin pick the best monitor (prefers fpp_group_default.monitor on FPP 9+ with PipeWire, which carries the full show mix). Or enter a specific source name like alsa_output.platform-bcm2835_audio.stereo-fallback.monitor. Detected sources are listed below."><img id="ll_pulse_source_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span>
                         <div id="ll_pulse_list" class="text-secondary" style="font-size:12px; margin-top:4px;"></div>
                     </td>
                 </tr>
-                <tr id="row_alsa" style="<?php echo $settings['source']==='pulse' ? 'display:none;' : ''; ?>">
+                <tr id="row_alsa" style="<?php echo $llSettings['source']==='pulse' ? 'display:none;' : ''; ?>">
                     <td style="padding: 4px;"><b>ALSA Device:</b></td>
                     <td style="padding: 4px;">
-                        <input type="text" id="ll_alsa_device" size="30" value="<?php echo htmlspecialchars($settings['alsa_device'] ?? 'default'); ?>" placeholder="default">
+                        <input type="text" id="ll_alsa_device" size="30" value="<?php echo htmlspecialchars($llSettings['alsa_device'] ?? 'default'); ?>" placeholder="default">
                         <span id="ll_alsa_device_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="ALSA capture device. Common values: default (mixer default), hw:0,0 (first card, first device), plughw:0,0 (with format conversion). On some hardware you may need the snd-aloop loopback device (hw:Loopback,1,0) if your audio hardware doesn&#39;t support concurrent capture. Detected devices are listed below."><img id="ll_alsa_device_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span>
                         <div id="ll_alsa_list" class="text-secondary" style="font-size:12px; margin-top:4px;"></div>
                     </td>
@@ -96,7 +78,7 @@ $settings = $llSettings;
                     <td style="padding: 4px;">
                         <select id="ll_bitrate">
                             <?php foreach (['64k','96k','128k','160k','192k','256k','320k'] as $br): ?>
-                            <option value="<?php echo $br; ?>" <?php echo ($settings['bitrate']===$br?'selected':''); ?>><?php echo $br; ?></option>
+                            <option value="<?php echo $br; ?>" <?php echo ($llSettings['bitrate']===$br?'selected':''); ?>><?php echo $br; ?></option>
                             <?php endforeach; ?>
                         </select>
                         <span id="ll_bitrate_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="MP3 encoding bitrate. Higher = better quality but more CPU and bandwidth. 128k is recommended for show audio (5–10% CPU on Pi 4). Use 64k/96k if audio is choppy or CPU is high."><img id="ll_bitrate_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span>
@@ -106,10 +88,10 @@ $settings = $llSettings;
                     <td style="padding: 4px;"><b>Sample Rate:</b></td>
                     <td style="padding: 4px;">
                         <select id="ll_samplerate">
-                            <option value="44100" <?php echo ($settings['sample_rate']==44100?'selected':''); ?>>44100 Hz (CD)</option>
-                            <option value="48000" <?php echo ($settings['sample_rate']==48000?'selected':''); ?>>48000 Hz</option>
-                            <option value="32000" <?php echo ($settings['sample_rate']==32000?'selected':''); ?>>32000 Hz</option>
-                            <option value="22050" <?php echo ($settings['sample_rate']==22050?'selected':''); ?>>22050 Hz (low)</option>
+                            <option value="44100" <?php echo ($llSettings['sample_rate']==44100?'selected':''); ?>>44100 Hz (CD)</option>
+                            <option value="48000" <?php echo ($llSettings['sample_rate']==48000?'selected':''); ?>>48000 Hz</option>
+                            <option value="32000" <?php echo ($llSettings['sample_rate']==32000?'selected':''); ?>>32000 Hz</option>
+                            <option value="22050" <?php echo ($llSettings['sample_rate']==22050?'selected':''); ?>>22050 Hz (low)</option>
                         </select>
                         <span id="ll_samplerate_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="Audio sample rate. 44100 Hz (CD quality) is recommended and matches most show media. Use 48000 Hz if your media is 48 kHz, or 22050 Hz for low-bandwidth."><img id="ll_samplerate_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span>
                     </td>
@@ -118,8 +100,8 @@ $settings = $llSettings;
                     <td style="padding: 4px;"><b>Channels:</b></td>
                     <td style="padding: 4px;">
                         <select id="ll_channels">
-                            <option value="2" <?php echo ($settings['channels']==2?'selected':''); ?>>Stereo (2)</option>
-                            <option value="1" <?php echo ($settings['channels']==1?'selected':''); ?>>Mono (1)</option>
+                            <option value="2" <?php echo ($llSettings['channels']==2?'selected':''); ?>>Stereo (2)</option>
+                            <option value="1" <?php echo ($llSettings['channels']==1?'selected':''); ?>>Mono (1)</option>
                         </select>
                         <span id="ll_channels_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="Number of audio channels. Stereo (2) preserves left/right. Mono (1) halves bandwidth and is fine for voice announcements."><img id="ll_channels_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span>
                     </td>
