@@ -133,7 +133,13 @@ function llFindFfmpeg() {
     return 'ffmpeg';
 }
 
-function llDetectAudioSources() {
+function llDetectAudioSources($forceRefresh = false) {
+    // Memoized per request: detection shells out ~10x (ffmpeg, pactl,
+    // arecord, pw-cli...) plus up to 6 HTTP probes. /stream calls it 3x and
+    // /sync-status paths call it alongside slow fppd polls — without caching
+    // that adds seconds to stream start. Pass true to force a fresh probe.
+    static $cache = null;
+    if ($cache !== null && !$forceRefresh) return $cache;
     $result = [
         'ffmpeg' => false,
         'ffmpeg_path' => '',
@@ -303,6 +309,7 @@ function llDetectAudioSources() {
     $result['liveAvailable'] = $result['ffmpeg'] && ($result['pipewire'] || $result['pulse'] || $result['alsa']);
     $result['exactAvailable'] = $result['ffmpeg'] && $result['pipewire'] && $hasFppGroup;
     $result['pipewire_required'] = false;
+    $cache = $result;
     return $result;
 }
 
@@ -531,27 +538,50 @@ function llGetFallbackMedia() {
     return null;
 }
 
+function llMediaRoot() {
+    $md = getenv('MEDIADIR');
+    if (is_string($md) && $md !== '') return rtrim($md, '/');
+    if (isset($GLOBALS['settings']['mediaDirectory']) && is_string($GLOBALS['settings']['mediaDirectory']) && $GLOBALS['settings']['mediaDirectory'] !== '') {
+        return rtrim($GLOBALS['settings']['mediaDirectory'], '/');
+    }
+    return '/home/fpp/media';
+}
+
+function llPathInMediaRoot($path) {
+    // Containment guard: /media endpoint must never serve files outside the
+    // media tree (path traversal via absolute paths or ../ segments).
+    $real = realpath($path);
+    if ($real === false) return false;
+    $root = realpath(llMediaRoot());
+    if ($root === false) $root = llMediaRoot();
+    return $real === $root || strpos($real, rtrim($root, '/') . '/') === 0;
+}
+
 function llGetMediaPath($mediaName) {
-    // If already absolute path
-    if (strpos($mediaName, '/') === 0 && file_exists($mediaName)) return $mediaName;
+    // Reject NUL bytes outright (bypass realpath checks on some builds)
+    if (strpos($mediaName, "\0") !== false) return null;
+    // If already absolute path — only inside the media tree
+    if (strpos($mediaName, '/') === 0 && file_exists($mediaName) && llPathInMediaRoot($mediaName)) return $mediaName;
     // FPP stores media in /home/fpp/media/music or /home/fpp/media/videos
+    $mediaRoot = llMediaRoot();
     $bases = [
         '/home/fpp/media/music',
         '/home/fpp/media/videos',
         '/home/fpp/media',
-        getenv('MEDIADIR') ? getenv('MEDIADIR') . '/music' : null,
+        $mediaRoot . '/music',
     ];
     foreach ($bases as $base) {
         if (!$base) continue;
         $candidate = rtrim($base, '/') . '/' . $mediaName;
-        if (file_exists($candidate)) return $candidate;
+        if (file_exists($candidate) && llPathInMediaRoot($candidate)) return $candidate;
         // also try without subdir if mediaName already contains path
         $candidate2 = rtrim($base, '/') . '/' . basename($mediaName);
-        if (file_exists($candidate2)) return $candidate2;
+        if (file_exists($candidate2) && llPathInMediaRoot($candidate2)) return $candidate2;
     }
     // fallback: search via find (limited) — do not read another plugin's /tmp (§5)
-    $out = trim(@shell_exec('find /home/fpp/media -maxdepth 4 -name ' . escapeshellarg(basename($mediaName)) . ' 2>/dev/null | head -1') ?? '');
-    if ($out && file_exists($out)) return $out;
+    // confined to the media tree by construction
+    $out = trim(@shell_exec('find ' . escapeshellarg($mediaRoot) . ' -maxdepth 4 -name ' . escapeshellarg(basename($mediaName)) . ' 2>/dev/null | head -1') ?? '');
+    if ($out && file_exists($out) && llPathInMediaRoot($out)) return $out;
     return null;
 }
 
@@ -1148,7 +1178,9 @@ function llStreamFileSync($isExplicitFileMode) {
             if (isset($fallback['bgStatus']['trackDuration']) && is_numeric($fallback['bgStatus']['trackDuration'])) $duration = (float)$fallback['bgStatus']['trackDuration'];
             elseif (isset($fallback['bgStatus']['duration']) && is_numeric($fallback['bgStatus']['duration'])) $duration = (float)$fallback['bgStatus']['duration'];
             $remaining = $duration > 0 ? max(0, $duration - $elapsed) : 0;
-            $durationArg = $remaining > 0 ? ' -t ' . escapeshellarg((string)($remaining + 0.5)) : '';
+            // -t counts from seekPos (elapsed - latency), not from elapsed,
+            // so cover remaining + latency or the tail is cut short.
+            $durationArg = $remaining > 0 ? ' -t ' . escapeshellarg((string)($remaining + LLSyncTiming::SEEK_LATENCY_S + 0.5)) : '';
             $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)$seekPos) . $durationArg . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -write_xing 0 -id3v2_version 0 -f mp3 -flush_packets 1 -';
             $handle = @popen($cmd . ' 2>/dev/null', 'r');
             if ($handle) {
@@ -1237,7 +1269,11 @@ function llStreamFileSync($isExplicitFileMode) {
                     header('HTTP/1.1 206 Partial Content');
                     header("Content-Range: bytes $start-$end/$size");
                     header('Content-Length: ' . ($end - $start + 1));
-                    $fp = fopen($path, 'rb');
+                    $fp = @fopen($path, 'rb');
+                    if (!$fp) {
+                        header('HTTP/1.1 500 Internal Server Error');
+                        return llJson(['success' => false, 'error' => 'Could not open media file']);
+                    }
                     fseek($fp, $start);
                     $remaining = $end - $start + 1;
                     while ($remaining > 0 && !feof($fp) && connection_status() === CONNECTION_NORMAL) {
@@ -1344,7 +1380,11 @@ function llMediaStreamEndpoint() {
                 header('HTTP/1.1 206 Partial Content');
                 header("Content-Range: bytes $start-$end/$size");
                 header('Content-Length: ' . ($end - $start + 1));
-                $fp = fopen($path, 'rb');
+                $fp = @fopen($path, 'rb');
+                if (!$fp) {
+                    header('HTTP/1.1 500 Internal Server Error');
+                    return llJson(['success' => false, 'error' => 'Could not open media file']);
+                }
                 fseek($fp, $start);
                 $remaining = $end - $start + 1;
                 while ($remaining > 0 && !feof($fp) && connection_status() === CONNECTION_NORMAL) {

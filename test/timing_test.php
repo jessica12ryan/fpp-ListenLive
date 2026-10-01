@@ -96,12 +96,14 @@ $a = LLSyncTiming::ffmpegSeekArgs(10, 100);
 checkFloat($a['seekPos'], 8.7, 'seek', __LINE__);
 checkFloat($a['remaining'], 90.0, 'remaining', __LINE__);
 check($a['durationArg'] !== '', 'has -t', __LINE__);
+checkEq($a['durationArg'], ' -t 91.8', '-t covers remaining + latency + pad', __LINE__);
 $b = LLSyncTiming::ffmpegSeekArgs(0.5, 0);
 checkFloat($b['seekPos'], 0.0, 'seek clamped', __LINE__);
 checkFloat($b['remaining'], 0.0, 'no duration', __LINE__);
 checkEq($b['durationArg'], '', 'no -t when unknown', __LINE__);
 $c = LLSyncTiming::ffmpegSeekArgs(10, 100, true);
 checkFloat($c['seekPos'], 9.5, 'seamless seek', __LINE__);
+checkEq($c['durationArg'], ' -t 91.0', 'seamless -t covers remaining + 0.5 latency + pad', __LINE__);
 
 if ($failures === 0) {
     echo "timing_test: all checks passed\n";

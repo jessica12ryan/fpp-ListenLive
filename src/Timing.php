@@ -145,13 +145,15 @@ class LLSyncTiming
 
     /**
      * Compute ffmpeg args for file-sync (pure, returns array for testability).
+     * -t counts from seekPos (elapsed - latency), so it must cover
+     * remaining + latency or the track tail is cut short. Mirrors api.php.
      */
     public static function ffmpegSeekArgs(float $elapsed, float $duration, bool $isSeamlessNext = false): array
     {
         $latency = $isSeamlessNext ? self::SEEK_LATENCY_SEAMLESS_S : self::SEEK_LATENCY_S;
         $seekPos = self::seekPosition($elapsed, $latency);
         $remaining = self::remaining($duration, $elapsed);
-        $durationArg = $remaining > 0 ? sprintf(' -t %.1f', $remaining + 0.5) : '';
+        $durationArg = $remaining > 0 ? sprintf(' -t %.1f', $remaining + $latency + 0.5) : '';
         return [
             'seekPos' => $seekPos,
             'remaining' => $remaining,

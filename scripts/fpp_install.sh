@@ -75,7 +75,8 @@ if [ ! -f "${PLUGIN_DIR}/config/settings.json" ]; then
   "channels": 2,
   "alsa_device": "default",
   "pulse_source": "auto",
-  "volume": 100
+  "volume": 100,
+  "allow_remote": 0
 }
 EOF
 fi
