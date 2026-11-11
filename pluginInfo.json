@@ -7,6 +7,7 @@
 	"srcURL": "https://github.com/jessica12ryan/fpp-ListenLive.git",
 	"bugURL": "https://github.com/jessica12ryan/fpp-ListenLive/issues",
 	"iconURL": "https://raw.githubusercontent.com/jessica12ryan/fpp-ListenLive/main/icon.png",
+	"releaseNotesStyle": "gitHistory",
 	"privacy": {
 		"summary": "Streams your show's live audio to your browser on your home network so you can hear what the audience hears. Nothing is sent to the internet.",
 		"sends": [],
