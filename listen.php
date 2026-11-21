@@ -623,7 +623,11 @@ var llExactAudio = {
         // Drift of what the listener is actually hearing right now.
         var audible = active ? (active.seek + (now - active.when)) - m : 0;
         this.drift = audible;
-        if (active && Math.abs(audible) >= this.resyncThreshold) {
+        var acquiring = llMasterClock.acquiredAt && (performance.now() - llMasterClock.acquiredAt) < 2000;
+        // During the 2 s acquisition window after a track change, absorb small
+        // clock errors with bounded nudges instead of a hard-resync gap.
+        var hardThreshold = acquiring ? 0.4 : this.resyncThreshold;
+        if (active && Math.abs(audible) >= hardThreshold) {
             // Require a persistent error. One noisy clock sample must never
             // trigger a 150 ms fade/tear-down (that was the ~3 s chop).
             if (++this.driftCount >= 3) {
@@ -642,7 +646,6 @@ var llExactAudio = {
         if (this.driftHist.length < 2) return false;
         var sorted = this.driftHist.slice().sort(function(a, b) { return a - b; });
         var med = sorted[Math.floor(sorted.length / 2)];
-        var acquiring = llMasterClock.acquiredAt && (performance.now() - llMasterClock.acquiredAt) < 2000;
         var threshold = acquiring ? this.acquireNudgeThreshold : this.nudgeThreshold;
         if (Math.abs(med) >= threshold) {
             // Cap the step: trim small errors over a few polls instead of one
@@ -989,9 +992,12 @@ var llPlayer = {
     syncNativeMute: function() {
         if (!llPlayer.audio) return;
         var webAudioAudible = !!(llExactAudio.active && llExactAudio.audible && !llExactAudio.fallbackActive);
+        // While Web Audio is audible the native stream stays connected but
+        // muted. Pausing/reloading it at every cutover costs a stream-start
+        // buffer; keeping it live means unmuting is instantaneous and there is
+        // never stale buffered audio to replay. The 'playing' handler is
+        // idempotent, so the extra engine events are harmless.
         try { llPlayer.audio.muted = llPlayer.isMuted || webAudioAudible; } catch(e) {}
-        if (webAudioAudible && llPlayer.isPlaying) llPlayer.suspendNative();
-        else if (!webAudioAudible && llPlayer.nativeSuspended) llPlayer.resumeNative();
     },
     suspendNative: function() {
         if (!llPlayer.audio || llPlayer.nativeSuspended) return;
@@ -1032,8 +1038,10 @@ var llPlayer = {
         llPlayer.trackChangeTimeout = setTimeout(function(){ llPlayer.trackChangePending = false; }, 4000);
     },
     endTrackChange: function() {
+        // Keep the idle guard up for a few seconds after the cutover commits:
+        // FPP can still report idle/no-media while finishing the transition.
         clearTimeout(llPlayer.trackChangeTimeout);
-        llPlayer.trackChangePending = false;
+        llPlayer.trackChangeTimeout = setTimeout(function(){ llPlayer.trackChangePending = false; }, 4000);
     },
     // FPP reports the show ended. Stop everything cleanly so the native stream
     // cannot fire reconnect/error events while there is nothing to play. A new
@@ -1190,6 +1198,9 @@ var llPlayer = {
             // Do not diagnose or reconnect while FPP is idle or while we are
             // deliberately tearing the stream down.
             if (llPlayer.ignoringStreamErrors || llPlayer.fppIdle || !llPlayer.isPlaying) return;
+            // While exact audio is running, the native stream is only a muted
+            // bridge; its failures must not surface as player errors.
+            if (llExactAudio.active && llExactAudio.audible && !llExactAudio.fallbackActive) return;
             var err = llPlayer.audio.error;
             var code = err ? err.code : 0;
             var msg = 'Stream error (code ' + code + ')';
