@@ -968,6 +968,9 @@ var llPlayer = {
     gestureRetryAdded: false,
     lastGestureStart: 0,
     autoplayPolicy: '',
+    ignoringStreamErrors: false,
+    fppIdle: false,
+    idleStatusCount: 0,
     // Deadline-at-read: monotonic timestamp of last media change for confidence
     lastMediaAnnouncedAtMono: null,
     lastElapsedHalf: null,
@@ -1008,14 +1011,39 @@ var llPlayer = {
         llPlayer.userPaused = !!paused;
         if (paused) llPlayer.autoPlayBlocked = false;
     },
-    // FPP reports the show ended; stop the transport UI but leave the exact
-    // engine polling so the next playlist starts without a click.
-    onExactEnded: function(reason) {
+    // FPP reports the show ended. Stop everything cleanly so the native stream
+    // cannot fire reconnect/error events while there is nothing to play. A new
+    // playlist still auto-starts because userPaused/autoPlayBlocked are cleared.
+    onFppIdle: function(reason) {
+        if (!llPlayer.isPlaying && !llPlayer.audio.src) {
+            llPlayer.fppIdle = true;
+            return;
+        }
         llPlayer.isPlaying = false;
         llPlayer.setUserPaused(false);
+        llPlayer.autoPlayBlocked = false;
+        llPlayer.nativeSuspended = false;
         llPlayer.suppressNativePause = true;
-        try { llPlayer.audio.pause(); } catch(e) {}
-        setTimeout(function(){ llPlayer.suppressNativePause = false; }, 0);
+        llPlayer.ignoringStreamErrors = true;
+        clearTimeout(llPlayer.reconnectTimer);
+        llPlayer.reconnecting = false;
+        clearTimeout(llPlayer.trackChangeTimeout);
+        clearTimeout(llPlayer.stalledTimer);
+        clearTimeout(llPlayer.waitingTimer);
+        llPlayer.reconnectAttempts = 0;
+        llPlayer.trackChangePending = false;
+        try { llExactAudio.stop(); } catch(e) {}
+        try { llExact.stop(); } catch(e) {}
+        try {
+            llPlayer.audio.pause();
+            llPlayer.audio.removeAttribute('src');
+            llPlayer.audio.load();
+        } catch(e) {}
+        setTimeout(function(){
+            llPlayer.suppressNativePause = false;
+            llPlayer.ignoringStreamErrors = false;
+        }, 200);
+        llPlayer.fppIdle = true;
         $('#ll_badge').removeClass('ll-badge-live ll-badge-warn').addClass('ll-badge-idle').text('Idle');
         $('#ll_wave').addClass('paused');
         $('#ll_status_text').html('<span class="text-secondary">' +
@@ -1023,6 +1051,10 @@ var llPlayer = {
         $('#ll_btn_play').val('▶ Play');
         $('#ll_btn_play').attr('onclick', 'llPlayer.play();');
         $('#ll_timing').hide();
+        $('#ll_enable_audio').hide();
+    },
+    onExactEnded: function(reason) {
+        llPlayer.onFppIdle(reason);
     },
 
     init: function() {
@@ -1128,6 +1160,10 @@ var llPlayer = {
             }
         });
         llPlayer.audio.addEventListener('error', function() {
+            // Idle is not an error: the /stream endpoint has nothing to serve.
+            // Do not diagnose or reconnect while FPP is idle or while we are
+            // deliberately tearing the stream down.
+            if (llPlayer.ignoringStreamErrors || llPlayer.fppIdle || !llPlayer.isPlaying) return;
             var err = llPlayer.audio.error;
             var code = err ? err.code : 0;
             var msg = 'Stream error (code ' + code + ')';
@@ -1507,8 +1543,22 @@ var llPlayer = {
 
                 // Badge based on FPP status + background/after-hours
                 var statusName = (s.status_name || s.status || '').toString().toLowerCase();
-                var isPlaying = statusName.indexOf('playing') !== -1 || statusName.indexOf('active') !== -1;
-                if (isBackgroundPlaying) isPlaying = true;
+                var fppPlaying = statusName.indexOf('playing') !== -1 || statusName.indexOf('active') !== -1;
+                var isPlaying = fppPlaying || isBackgroundPlaying;
+
+                // Clean shutdown when FPP finishes and there is no background
+                // music. Two consecutive 1 Hz polls avoid stopping during the
+                // brief gap between playlist items.
+                var isFppIdle = !fppPlaying && !isBackgroundPlaying;
+                llPlayer.fppIdle = isFppIdle;
+                if (isFppIdle) {
+                    if (++llPlayer.idleStatusCount >= 2 && llPlayer.isPlaying &&
+                        !llPlayer.reconnecting && !llPlayer.trackChangePending) {
+                        llPlayer.onFppIdle('FPP is idle');
+                    }
+                } else {
+                    llPlayer.idleStatusCount = 0;
+                }
                 if (!llPlayer.isPlaying) {
                     if (isPlaying) {
                         var label = isBackgroundPlaying && !s.current_song ? 'Background Playing' : 'FPP Playing';
