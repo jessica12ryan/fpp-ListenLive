@@ -197,6 +197,60 @@ namespace {
     rt_check(!in_array('HTTP/1.1 503 Service Unavailable', $GLOBALS['ll_headers'], true),
              'clock never emits 503');
 
+    // ---------------- 5. FPP transport mapping (auto-play / switching / end) ----------------
+    rt_case('sync transport');
+    $t = \LLRuntimeTest\llSyncTransport([
+        'status_name' => 'playing',
+        'current_song' => 'song.mp3',
+        'current_sequence' => 'show.fseq',
+        'current_playlist' => 'Saturday',
+        'milliseconds_elapsed' => 12345,
+        'seconds_remaining' => 45,
+    ], ['duration' => 0, 'playlist_item' => 2, 'playlist_action' => 'start']);
+    rt_check($t['available'] === true, 'transport available from fppd status');
+    rt_check($t['playing'] === true, 'transport playing');
+    rt_check($t['current_song'] === 'song.mp3' && $t['current_sequence'] === 'show.fseq',
+             'transport exposes song and sequence');
+    rt_check($t['media_key'] === 'song.mp3|show.fseq|Saturday|2',
+             'media_key includes song, sequence, playlist and item');
+    rt_check(abs((float)$t['elapsed'] - 12.345) < 0.001, 'elapsed uses milliseconds_elapsed');
+    rt_check(abs((float)$t['duration'] - 57.345) < 0.001, 'duration derived from elapsed + remaining');
+
+    $idle = \LLRuntimeTest\llSyncTransport(['status_name' => 'idle', 'current_song' => 'false', 'current_sequence' => 'false'], []);
+    rt_check($idle['available'] === true && $idle['playing'] === false, 'idle status detected');
+    $unknown = \LLRuntimeTest\llSyncTransport(null, []);
+    rt_check($unknown['available'] === false && $unknown['playing'] === false, 'unknown transport when fppd unreachable');
+    $paused = \LLRuntimeTest\llSyncTransport(['status_name' => 'paused', 'current_song' => 'song.mp3', 'current_sequence' => 'show.fseq'], []);
+    rt_check($paused['playing'] === false, 'paused FPP is not treated as playing even with media fields');
+
+    rt_case('apply transport to sync');
+    $base = [
+        'has_media' => true, 'media' => 'show.fseq', 'file_type' => 'sequence',
+        'seconds' => 7, 'extrapolated_seconds' => 7, 'duration' => 300,
+    ];
+    $mapped = \LLRuntimeTest\llApplyTransportToSync($base, [
+        'status_name' => 'playing', 'current_song' => 'song.mp3',
+        'current_sequence' => 'show.fseq', 'current_playlist' => 'Saturday',
+    ], 1000);
+    rt_check($mapped['media'] === 'song.mp3' && $mapped['sync_media'] === 'show.fseq',
+             'sequence clock is mapped to the current_song audio');
+    rt_check($mapped['has_media'] === true && is_array($mapped['transport']),
+             'mapped sync carries transport');
+
+    $silent = \LLRuntimeTest\llApplyTransportToSync($base, [
+        'status_name' => 'playing', 'current_song' => '', 'current_sequence' => 'show.fseq',
+    ], 1000);
+    rt_check($silent['has_media'] === false && $silent['file_type'] === 'sequence-silent',
+             'sequence without audio goes idle instead of decoding .fseq');
+
+    rt_case('reanchor master');
+    $re = \LLRuntimeTest\llReanchorMaster([
+        'extrapolated_seconds' => 10.0,
+        'snapshot_wall_ms' => 99000,
+    ], 99250);
+    rt_check(abs((float)$re['master_seconds'] - 10.25) < 0.001 && $re['sync_age_ms'] === 250,
+             'master_seconds advanced by response age');
+
     if ($rt_failures === 0) {
         echo "glue_runtime_test: all checks passed\n";
         exit(0);

@@ -211,7 +211,7 @@ var llConfig = {
     },
     refreshSources: function() {
         $.ajax({
-            url: 'api/plugin/fpp-ListenLive/diagnostics',
+            url: 'api/plugin/fpp-ListenLive/diagnostics?refresh=1',
             type: 'GET',
             dataType: 'json',
             success: function(d) {

@@ -1,5 +1,6 @@
 <h3>Listen Live — Listen</h3>
-<p>Play FPP's audio in your browser. The primary path is Web Audio <b>Exact frame sync</b>: short raw-PCM chunks are scheduled sample-accurately against FPP's native MultiSync clock, with only ~0.5 s buffered (more when the tab is hidden). If chunk fetch/decode fails a few times, the player switches to the raw <code>audio/mpeg</code> live stream and labels it <b>best-effort / NOT frame-exact</b> — browser buffering adds unmeasured latency, so that path cannot be frame-locked to MultiSync.</p>
+<p>Play FPP's audio in your browser. If a show is already on air when you open the page, playback starts automatically (your browser may require one tap to allow audio). An explicit <b>Pause</b> is remembered for this tab and is not undone by status polling.</p>
+<p>The primary path is Web Audio <b>Exact frame sync</b>: short raw-PCM chunks are scheduled sample-accurately against FPP's native MultiSync clock, with only ~0.5 s buffered (more when the tab is hidden). If chunk fetch/decode fails a few times, the player switches to the raw <code>audio/mpeg</code> live stream and labels it <b>best-effort / NOT frame-exact</b> — browser buffering adds unmeasured latency, so that path cannot be frame-locked to MultiSync.</p>
 
 <h4>Player</h4>
 <ul>

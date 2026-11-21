@@ -86,11 +86,14 @@ if "lastElapsedHalf" not in listen or "curHalf" not in listen:
     fail("listen.php does not implement half-second dedup (lastElapsedHalf/curHalf) — should mirror PulseMesh curTS*2")
 if "* 2" not in listen or "Math.floor" not in listen:
     fail("listen.php dedup does not use *2 half-second quantization (needs both * 2 and Math.floor)")
-# poll interval must be 500, not 2000
+# /status is display-only and polls at 1 Hz. The exact clock polls /sync at
+# 4 Hz independently; a 2 Hz /status poll duplicated all the heavy fppd work.
 if "setInterval(llPlayer.refreshStatus, 2000)" in listen:
-    fail("listen.php still polls at 2000ms — should be 500ms with dedup")
-if "setInterval(llPlayer.refreshStatus, 500)" not in listen:
-    fail("listen.php does not poll at 500ms — half-second dedup requires faster poll")
+    fail("listen.php still polls at 2000ms")
+if "setInterval(llPlayer.refreshStatus, 500)" in listen:
+    fail("listen.php still polls /status at 500ms — 1 Hz is enough for display")
+if "setInterval(llPlayer.refreshStatus, 1000)" not in listen:
+    fail("listen.php does not poll /status at 1000ms")
 
 # 6. Track-change announced timestamp for confidence (deadline-at-read)
 if "lastMediaAnnouncedAtMono" not in listen:

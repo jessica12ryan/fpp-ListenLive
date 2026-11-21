@@ -3,7 +3,7 @@
     "/ListenLive/sync": {
       "get": {
         "summary": "Frame-exact sync state from FPP's MultiSync clock",
-        "description": "Returns the current media or sequence position from FPP's native MultiSync clock, extrapolated with a steady_clock delta. Media and sequence sync are tracked separately; fresh media wins so the reported position always corresponds to the audio file being fetched. The PHP wrapper re-anchors the snapshot to its response time and returns master_seconds: the browser must add only its measured RTT/2 and must never subtract browser wall time from server wall time (that is clock skew, not latency). On players and remotes this requires MultiSync to be enabled (FPP Settings -> MultiSync); otherwise confidence is 'unresolved'. The native plugin also mirrors state to <mediadir>/plugindata/fpp-ListenLive/ll_sync.json. The legacy HTTP variant uses ?clock=1 to return the clock payload instead.",
+        "description": "Returns the current media or sequence position from FPP's native MultiSync clock, extrapolated with a steady_clock delta. Media and sequence sync are tracked separately; fresh media wins so the reported position always corresponds to the audio file being fetched. The PHP wrapper re-anchors the snapshot to its response time and returns master_seconds: the browser must add only its measured RTT/2 and must never subtract browser wall time from server wall time (that is clock skew, not latency). On players and remotes this requires MultiSync to be enabled (FPP Settings -> MultiSync); otherwise confidence is 'unresolved'. The native plugin also mirrors state to <mediadir>/plugindata/fpp-ListenLive/ll_sync.json. The legacy HTTP variant uses ?clock=1 to return the clock payload instead. The wrapper also returns a compact transport block from a cached fppd status read: listen.php uses it to auto-play when the page opens during a show, cut over exactly once on a track/sequence change, and go idle when the show ends. Timing still comes only from the native MultiSync position.",
         "responses": {
           "200": {
             "description": "Sync state (always answerable; precision degrades to unresolved/stale rather than failing)",
@@ -37,7 +37,27 @@
                     "has_duration": { "type": "boolean", "description": "True when 'duration' is a trustworthy value for the current media." },
                     "source": { "type": "string", "description": "PHP wrapper: clock source (native/c++/file/fallback)." },
                     "server_monotonic_ms": { "type": "integer", "description": "PHP wrapper: server monotonic timestamp for round-trip compensation." },
-                    "server_wall_ms": { "type": "integer", "description": "PHP wrapper: server wall timestamp for round-trip compensation." }
+                    "server_wall_ms": { "type": "integer", "description": "PHP wrapper: server wall timestamp for round-trip compensation." },
+                    "sync_media": { "type": "string", "description": "For a sequence, the native media/sequence name that produced the clock; the 'media' field is remapped to current_song for audio chunk fetching." },
+                    "clock_source": { "type": "string", "description": "Set to 'fppd-status' when the clock comes from the cached fppd status rather than native MultiSync." },
+                    "transport": {
+                      "type": "object",
+                      "description": "FPP transport state from one cached fppd status read, used for auto-play, track cutover and end-of-show detection. Never drives playback timing.",
+                      "properties": {
+                        "available": { "type": "boolean", "description": "False when fppd status could not be read." },
+                        "playing": { "type": "boolean", "description": "True when FPP reports a show on air (paused/idle are false)." },
+                        "status_name": { "type": "string", "description": "Raw fppd status_name." },
+                        "current_song": { "type": "string", "description": "Audio file FPP reports." },
+                        "current_sequence": { "type": "string", "description": "Sequence FPP reports." },
+                        "current_playlist": { "type": "string", "description": "Playlist FPP reports." },
+                        "playlist_item": { "type": "integer", "description": "Current playlist item when exposed by the native plugin." },
+                        "playlist_action": { "type": "string", "description": "Most recent playlist action." },
+                        "media_key": { "type": "string", "description": "song|sequence|playlist|item; a change triggers exactly one cutover." },
+                        "elapsed": { "type": "number", "description": "fppd sub-second elapsed, or null." },
+                        "seconds_remaining": { "type": "number", "description": "fppd remaining seconds, or null." },
+                        "duration": { "type": "number", "description": "Best available show duration, or null." }
+                      }
+                    }
                   }
                 }
               }

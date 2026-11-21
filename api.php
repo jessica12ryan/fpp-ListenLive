@@ -52,6 +52,17 @@ function llLog($msg) {
     @file_put_contents(llGetLogFile(), date('Y-m-d H:i:s') . ' fpp-ListenLive api: ' . $msg . "\n", FILE_APPEND | LOCK_EX);
 }
 
+// Atomic small-JSON write. Readers may run concurrently with the writer, so
+// never expose a partially written file (temp + rename).
+function llAtomicJsonWrite($path, array $data) {
+    $dir = dirname($path);
+    if (!is_dir($dir)) @mkdir($dir, 0775, true);
+    $tmp = $path . '.tmp.' . getmypid() . '.' . mt_rand(1000, 9999);
+    if (@file_put_contents($tmp, json_encode($data, JSON_UNESCAPED_SLASHES), LOCK_EX) === false) return false;
+    if (!@rename($tmp, $path)) { @unlink($tmp); return false; }
+    return true;
+}
+
 function llEnsureCommonLoaded() {
     if (function_exists('ReadSettingFromFile') && function_exists('WriteSettingToFile')) return true;
     // api.php runs outside the FPP page include — pull in common.php for the stable settings API (§3.1)
@@ -145,6 +156,41 @@ function llFindFfmpeg() {
     return 'ffmpeg';
 }
 
+function llFindFfprobe() {
+    $candidates = ['/usr/bin/ffprobe', '/usr/local/bin/ffprobe', '/opt/fpp/bin/ffprobe'];
+    foreach ($candidates as $c) {
+        if (is_executable($c)) return $c;
+    }
+    $which = trim(@shell_exec('which ffprobe 2>/dev/null') ?? '');
+    return ($which && is_executable($which)) ? $which : '';
+}
+
+// Duration of the audio file being fetched. fppd's seconds_elapsed +
+// seconds_remaining is the *sequence* length, which is wrong for the separate
+// song during an fseq show. ffprobe once per file, cached in plugindata.
+function llMediaDuration($media) {
+    static $memo = [];
+    if (!is_string($media) || $media === '' || $media === 'false') return 0.0;
+    if (array_key_exists($media, $memo)) return $memo[$media];
+    $cacheFile = llGetPlugindataDir() . '/ll_durations.json';
+    $cache = is_readable($cacheFile) ? @json_decode(@file_get_contents($cacheFile), true) : [];
+    if (!is_array($cache)) $cache = [];
+    if (isset($cache[$media]) && is_numeric($cache[$media])) {
+        return $memo[$media] = (float)$cache[$media];
+    }
+    $path = llGetMediaPath($media);
+    if (!$path || !file_exists($path)) return $memo[$media] = 0.0;
+    $ffprobe = llFindFfprobe();
+    if ($ffprobe === '') return $memo[$media] = 0.0;
+    $out = @shell_exec(escapeshellarg($ffprobe) . ' -v error -show_entries format=duration -of default=nw=1:nk=1 ' . escapeshellarg($path) . ' 2>/dev/null');
+    $dur = is_numeric(trim((string)$out)) ? (float)trim((string)$out) : 0.0;
+    if ($dur > 0) {
+        $cache[$media] = $dur;
+        llAtomicJsonWrite($cacheFile, $cache);
+    }
+    return $memo[$media] = $dur;
+}
+
 function llDetectAudioSources($forceRefresh = false) {
     // Memoized per request: detection shells out ~10x (ffmpeg, pactl,
     // arecord, pw-cli...) plus up to 6 HTTP probes. /stream calls it 3x and
@@ -152,6 +198,24 @@ function llDetectAudioSources($forceRefresh = false) {
     // that adds seconds to stream start. Pass true to force a fresh probe.
     static $cache = null;
     if ($cache !== null && !$forceRefresh) return $cache;
+
+    // Cross-request cache. /status is polled about twice a second and this
+    // function runs ffmpeg/pactl/arecord probes each time; re-running it on
+    // every poll starves the PCM chunk ffmpeg processes on a Pi. A short TTL
+    // keeps the UI honest without the constant shell-out storm.
+    $cacheFile = llGetPlugindataDir() . '/ll_detection.json';
+    $cacheVersion = 2;
+    if (!$forceRefresh && is_readable($cacheFile)) {
+        $age = time() - (int)@filemtime($cacheFile);
+        if ($age >= 0 && $age < 60) {
+            $cached = @json_decode(@file_get_contents($cacheFile), true);
+            if (is_array($cached) && ($cached['_cache_v'] ?? 0) === $cacheVersion && isset($cached['ffmpeg'])) {
+                unset($cached['_cache_v']);
+                $cache = $cached;
+                return $cache;
+            }
+        }
+    }
     $result = [
         'ffmpeg' => false,
         'ffmpeg_path' => '',
@@ -322,10 +386,34 @@ function llDetectAudioSources($forceRefresh = false) {
     $result['exactAvailable'] = $result['ffmpeg'] && $result['pipewire'] && $hasFppGroup;
     $result['pipewire_required'] = false;
     $cache = $result;
+    $toStore = $result;
+    $toStore['_cache_v'] = $cacheVersion;
+    llAtomicJsonWrite($cacheFile, $toStore);
     return $result;
 }
 
-function llGetFppStatus() {
+function llGetFppStatus($maxAgeMs = 1000) {
+    // Shared short cache. /sync and /status both poll this; without it the
+    // browser's 4-5 Hz polling becomes 4-5 fppd round trips per second per
+    // listener. $maxAgeMs = 0 forces a fresh read (used at sequence changes).
+    static $memo = null, $memoAt = 0.0;
+    $now = microtime(true);
+    if ($memo !== null && $maxAgeMs > 0 && (($now - $memoAt) * 1000.0) < $maxAgeMs) {
+        return $memo;
+    }
+    $cacheFile = llGetPlugindataDir() . '/ll_fpp_status.json';
+    if ($maxAgeMs > 0 && is_readable($cacheFile)) {
+        $wrapped = @json_decode(@file_get_contents($cacheFile), true);
+        if (is_array($wrapped) && isset($wrapped['at'], $wrapped['data']) && is_array($wrapped['data'])) {
+            $ageMs = ($now - (float)$wrapped['at']) * 1000.0;
+            if ($ageMs >= 0 && $ageMs < $maxAgeMs) {
+                $memo = $wrapped['data'];
+                $memoAt = (float)$wrapped['at'];
+                return $memo;
+            }
+        }
+    }
+
     // Use FPP's proxied API (Apache -> fppd) as the stable surface (§3.3).
     // Very short timeout keeps the UI responsive if fppd is slow.
     $urls = [
@@ -349,7 +437,12 @@ function llGetFppStatus() {
             }
             if ($json !== false && $httpCode === 200 && $json !== '') {
                 $data = json_decode($json, true);
-                if (is_array($data)) return $data;
+                if (is_array($data)) {
+                    $memo = $data;
+                    $memoAt = microtime(true);
+                    llAtomicJsonWrite($cacheFile, ['at' => $memoAt, 'data' => $data]);
+                    return $data;
+                }
             }
         }
     }
@@ -452,10 +545,10 @@ function llGetAfterHoursStatus() {
     return null;
 }
 
-function llGetFallbackMedia() {
+function llGetFallbackMedia($fppStatus = null) {
     // Returns [ 'path' => ..., 'type' => 'fpp'|'background'|'afterhours', 'info' => ... ] or null
     // 1) FPP current song/sequence
-    $fppStatus = llGetFppStatus();
+    if ($fppStatus === null) $fppStatus = llGetFppStatus();
     if ($fppStatus) {
         $media = $fppStatus['current_song'] ?? $fppStatus['current_sequence'] ?? null;
         if ($media && is_string($media) && $media !== '' && $media !== 'false') {
@@ -794,9 +887,16 @@ function llStatusEndpoint() {
     $settings = llLoadSettings();
     $detection = llDetectAudioSources();
     $fppStatus = llGetFppStatus();
-    $bgStatus = llGetBackgroundMusicStatus();
-    $ahStatus = llGetAfterHoursStatus();
-    $fallback = llGetFallbackMedia();
+    // BackgroundMusic / AfterHours probes are only needed when fppd has no
+    // media of its own. During a show this removes up to 6 HTTP round trips
+    // from a request the UI polls every second.
+    $hasFppMedia = is_array($fppStatus) && (
+        (!empty($fppStatus['current_song']) && $fppStatus['current_song'] !== 'false') ||
+        (!empty($fppStatus['current_sequence']) && $fppStatus['current_sequence'] !== 'false')
+    );
+    $bgStatus = $hasFppMedia ? null : llGetBackgroundMusicStatus();
+    $ahStatus = $hasFppMedia ? null : llGetAfterHoursStatus();
+    $fallback = llGetFallbackMedia($fppStatus);
     $nowPlaying = null;
     if ($fppStatus) {
         $nowPlaying = [
@@ -871,11 +971,13 @@ function llStatusEndpoint() {
 }
 
 function llDiagnosticsEndpoint() {
-    $detection = llDetectAudioSources();
+    // The UI's Refresh button passes ?refresh=1 to bypass the 60 s cache.
+    $force = isset($_GET['refresh']) && (string)$_GET['refresh'] === '1';
+    $detection = llDetectAudioSources($force);
     $fppStatus = llGetFppStatus();
     $bgStatus = llGetBackgroundMusicStatus();
     $ahStatus = llGetAfterHoursStatus();
-    $fallback = llGetFallbackMedia();
+    $fallback = llGetFallbackMedia($fppStatus);
     $settings = llLoadSettings();
     $cmds = llBuildFfmpegCommand($settings, $detection);
     return llJson([
@@ -1119,7 +1221,7 @@ function llStreamFileSync($isExplicitFileMode) {
     $elapsed = (float)($fallback['elapsed'] ?? 0);
     // For FPP type, double-check multisync-aware elapsed from fresh status (fallback may be stale)
     if ($fallback && $fallback['type'] === 'fpp') {
-        $fresh = llGetFppStatus();
+        $fresh = llGetFppStatus(0);
         if ($fresh && isset($fresh['seconds_elapsed'])) {
             $elapsed = (float)$fresh['seconds_elapsed'];
             // Multisync-aware elapsed from the same fresh status (no extra HTTP)
@@ -1586,10 +1688,10 @@ function llLogsEndpoint() {
     return llJson(['success' => true, 'entries' => array_reverse($lines)]);
 }
 
-// Status-poll sync: used as a fallback for media/duration and as a complete
-// last resort when the native sync plugin is unavailable. Cached briefly: the
-// browser polls /sync frequently and fppd status is an HTTP round trip (§3.3).
-function llFppSyncFallback() {
+// Last-resort status clock when the native plugin is unavailable. Cached
+// briefly: the browser polls /sync frequently and fppd status is an HTTP
+// round trip (§3.3). Callers that already have a status pass it in.
+function llFppSyncFallback($fppStatus = null) {
     static $cache = null, $cachedAt = 0.0;
     $now = microtime(true);
     if ($cache !== null && ($now - $cachedAt) < 0.25) {
@@ -1603,10 +1705,10 @@ function llFppSyncFallback() {
         $c['snapshot_wall_ms'] = $now * 1000.0;
         return $c;
     }
+    if ($fppStatus === null) $fppStatus = llGetFppStatus();
     $t0 = $now;
-    $fppStatus = llGetFppStatus();
-    $fallback = llGetFallbackMedia();
-    $elapsed = LLSyncTiming::elapsedFromStatus($fppStatus, llGetBackgroundMusicStatus(), $fallback);
+    $fallback = llGetFallbackMedia($fppStatus);
+    $elapsed = LLSyncTiming::elapsedFromStatus($fppStatus, null, $fallback);
     // fppd exposes sub-second precision when it provides milliseconds_elapsed.
     // Do not leave the player quantised to whole seconds in fallback mode.
     $msElapsed = llGetMultisyncElapsed($fppStatus);
@@ -1660,39 +1762,111 @@ function llReanchorMaster(array $sync, $serverWallMs) {
     return $sync;
 }
 
-// The native clock is authoritative for time, but it has no media duration and
-// no media state until MultiSync callbacks fire. Fill those gaps from fppd
-// status instead of letting an empty C++ payload shadow the working fallback.
-function llMergeSyncFallback(array $sync, array $fallback, $nowMono, $nowWall) {
-    $sync['server_monotonic_ms'] = $nowMono;
-    $sync['server_wall_ms'] = $nowWall;
-    if (!isset($sync['duration']) || !is_numeric($sync['duration'])) {
-        $sync['duration'] = $fallback['duration'];
+// Compact transport state from fppd. Cheap: one cached status read, no plugin
+// probes. The browser uses this for auto-play, track switching and endings,
+// while the native clock remains authoritative for time.
+function llSyncTransport($fppStatus, array $sync = []) {
+    $known = is_array($fppStatus);
+    $song = $known ? ($fppStatus['current_song'] ?? '') : '';
+    $seq  = $known ? ($fppStatus['current_sequence'] ?? '') : '';
+    $pl   = $known ? ($fppStatus['current_playlist'] ?? '') : '';
+    if (is_array($pl)) $pl = $pl['playlist'] ?? '';
+    if (!is_string($song) || $song === 'false') $song = '';
+    if (!is_string($seq) || $seq === 'false') $seq = '';
+    if (!is_string($pl)) $pl = '';
+    $statusName = $known ? (string)($fppStatus['status_name'] ?? ($fppStatus['status'] ?? '')) : '';
+    $playing = false;
+    if ($known) {
+        $sn = strtolower($statusName);
+        $stopped = in_array($sn, ['idle', 'stopped', 'stopping', 'paused', 'pause', ''], true);
+        $activeName = strpos($sn, 'play') !== false || strpos($sn, 'run') !== false;
+        $playing = !$stopped && ($activeName || $song !== '' || $seq !== '');
     }
-    $sync['has_duration'] = is_numeric($sync['duration']) && (float)$sync['duration'] > 0;
-    if (empty($sync['has_media']) || empty($sync['media'])) {
-        if ($fallback['has_media']) {
+    $elapsed = null;
+    $remaining = null;
+    if ($known) {
+        if (isset($fppStatus['milliseconds_elapsed']) && is_numeric($fppStatus['milliseconds_elapsed'])) {
+            $elapsed = (float)$fppStatus['milliseconds_elapsed'] / 1000.0;
+        } elseif (isset($fppStatus['seconds_elapsed']) && is_numeric($fppStatus['seconds_elapsed'])) {
+            $elapsed = (float)$fppStatus['seconds_elapsed'];
+        }
+        if (isset($fppStatus['seconds_remaining']) && is_numeric($fppStatus['seconds_remaining'])) {
+            $remaining = (float)$fppStatus['seconds_remaining'];
+        }
+    }
+    $duration = null;
+    if (isset($sync['duration']) && is_numeric($sync['duration']) && (float)$sync['duration'] > 0) {
+        $duration = (float)$sync['duration'];
+    } elseif ($elapsed !== null && $remaining !== null) {
+        $duration = $elapsed + $remaining;
+    }
+    $item = $sync['playlist_item'] ?? null;
+    $action = isset($sync['playlist_action']) && is_string($sync['playlist_action']) ? $sync['playlist_action'] : '';
+    return [
+        'available' => $known,
+        'playing' => $playing,
+        'status_name' => $statusName,
+        'current_song' => $song,
+        'current_sequence' => $seq,
+        'current_playlist' => $pl,
+        'playlist_item' => $item,
+        'playlist_action' => $action,
+        'media_key' => $song . '|' . $seq . '|' . $pl . '|' . (string)$item,
+        'elapsed' => $elapsed,
+        'seconds_remaining' => $remaining,
+        'duration' => $duration,
+    ];
+}
+
+// Attach fppd transport state to a native/file sync payload, map a sequence
+// clock to the audio file FPP is actually playing, and fill duration.
+function llApplyTransportToSync(array $sync, $fppStatus, $nowWall) {
+    $t = llSyncTransport($fppStatus, $sync);
+    $song = $t['current_song'];
+
+    // A sequence reports the master clock but is not an audio file. Fetch the
+    // current_song audio for chunks; if the sequence has no audio, go idle
+    // instead of trying to decode the .fseq (which forced a stream fallback).
+    if (($sync['file_type'] ?? '') === 'sequence') {
+        if ($song !== '') {
+            $sync['sync_media'] = $sync['media'] ?? '';
+            $sync['media'] = $song;
             $sync['has_media'] = true;
-            $sync['media'] = $fallback['media'];
-            $sync['seconds'] = $fallback['seconds'];
-            // Use fppd's clock here — MultiSync has no position for this media.
-            $sync['extrapolated_seconds'] = $fallback['extrapolated_seconds'];
-            $sync['file_type'] = 'fppd-status';
-            $sync['snapshot_wall_ms'] = $fallback['snapshot_wall_ms'] ?? $nowWall;
-            $sync['clock_source'] = 'fppd-status';
-            $sync['confidence'] = 'unresolved';
         } else {
             $sync['has_media'] = false;
             $sync['media'] = '';
             $sync['seconds'] = -1;
             $sync['extrapolated_seconds'] = -1;
+            $sync['file_type'] = 'sequence-silent';
         }
-    } elseif (!empty($sync['file_type']) && $sync['file_type'] === 'sequence' && !empty($fallback['media'])) {
-        // A sequence (.fseq) reports the master clock but is not an audio file.
-        // Keep the sync position, but fetch current_song audio for the chunks.
-        $sync['sync_media'] = $sync['media'];
-        $sync['media'] = $fallback['media'];
     }
+
+    // Native has no position: use fppd's sub-second status clock for a song.
+    // Never run the BackgroundMusic/AfterHours probe chain from this hot path.
+    if (empty($sync['has_media']) || empty($sync['media'])) {
+        if ($song !== '') {
+            $sync['has_media'] = true;
+            $sync['media'] = $song;
+            $sync['seconds'] = $t['elapsed'] !== null ? $t['elapsed'] : -1;
+            $sync['extrapolated_seconds'] = $t['elapsed'] !== null ? $t['elapsed'] : -1;
+            $sync['file_type'] = 'fppd-status';
+            $sync['snapshot_wall_ms'] = $nowWall;
+            $sync['clock_source'] = 'fppd-status';
+            $sync['confidence'] = 'unresolved';
+        }
+    }
+
+    // Prefer the audio file's own duration: during an fseq show fppd reports
+    // the sequence length, which is not the song length. Cached per file.
+    if (!empty($sync['media'])) {
+        $fileDur = llMediaDuration($sync['media']);
+        if ($fileDur > 0) $sync['duration'] = $fileDur;
+    }
+    if (empty($sync['duration']) || !is_numeric($sync['duration'])) {
+        if ($t['duration'] !== null) $sync['duration'] = $t['duration'];
+    }
+    $sync['has_duration'] = isset($sync['duration']) && is_numeric($sync['duration']) && (float)$sync['duration'] > 0;
+    $sync['transport'] = $t;
     return $sync;
 }
 
@@ -1700,9 +1874,9 @@ function llSyncEndpoint() {
     // Never 503 here: sync precision degrades (c++ -> file -> status poll)
     // instead of failing. JS polls this while playing; a 503 breaks exact sync.
     $syncFile = llGetPlugindataDir() . '/ll_sync.json';
-    $fallback = llFppSyncFallback();
 
-    // Try C++ plugin API via Apache proxy — stable surface (§3.3), most precise.
+    // 1) Native plugin API via Apache proxy — cheapest and most precise. Do
+    //    not touch the heavy fallback path until we know it is unavailable.
     $cppSync = null;
     if (function_exists('curl_init')) {
         $ch = curl_init('http://localhost/api/plugin-apis/ListenLive/sync');
@@ -1715,8 +1889,31 @@ function llSyncEndpoint() {
             $cppSync = json_decode($tmp, true);
         }
     }
-    // Capture server timestamps AFTER the native call. Capturing them before
-    // (the old behaviour) reported `server_wall_ms` tens of ms in the past.
+
+    // 2) Transport: one cached fppd status. At a sequence change, force a
+    //    fresh read so current_song maps to the new sequence immediately.
+    $fppStatus = llGetFppStatus(500);
+    if (is_array($cppSync) && ($cppSync['file_type'] ?? '') === 'sequence' && is_array($fppStatus)) {
+        $seqNow = $fppStatus['current_sequence'] ?? '';
+        if ($seqNow !== '' && $seqNow !== ($cppSync['media'] ?? '')) {
+            $fppStatus = llGetFppStatus(0);
+        }
+    }
+
+    // 3) File written by the C++ plugin (plugindata only — never /tmp).
+    $fileSync = null;
+    if (!is_array($cppSync) && is_readable($syncFile)) {
+        $j = @json_decode(@file_get_contents($syncFile), true);
+        if (is_array($j) && array_key_exists('media', $j)) $fileSync = $j;
+    }
+
+    // 4) Heavy status fallback only when neither native nor file has a clock.
+    $fallback = null;
+    if (!is_array($cppSync) && !is_array($fileSync)) {
+        $fallback = llFppSyncFallback($fppStatus);
+    }
+
+    // Capture the response time AFTER all polling so extrapolation is exact.
     $nowMono = LLSyncTiming::monotonicMs();
     $nowWall = LLSyncTiming::wallClockMs();
 
@@ -1726,41 +1923,45 @@ function llSyncEndpoint() {
         $cppSync['snapshot_wall_ms'] = isset($cppSync['wall_ms']) && is_numeric($cppSync['wall_ms'])
             ? (float)$cppSync['wall_ms'] : (float)$nowWall;
         $cppSync['native_wall_ms'] = $cppSync['snapshot_wall_ms'];
-        $sync = llMergeSyncFallback($cppSync, $fallback, $nowMono, $nowWall);
+        $sync = llApplyTransportToSync($cppSync, $fppStatus, $nowWall);
         $sync = llReanchorMaster($sync, $nowWall);
         $sync['source'] = 'c++';
         return llJson($sync);
     }
 
-    // File written by the C++ plugin (plugindata only — never /tmp).
-    if (is_readable($syncFile)) {
-        $j = @json_decode(@file_get_contents($syncFile), true);
-        if (is_array($j) && array_key_exists('media', $j)) {
-            if (isset($j['wall_ms'], $j['seconds']) && is_numeric($j['wall_ms']) && is_numeric($j['seconds']) && $j['seconds'] >= 0) {
-                $age = ($nowWall - (float)$j['wall_ms']) / 1000.0;
-                if ($age >= 0 && $age < 2.0) {
-                    $j['extrapolated_seconds'] = (float)$j['seconds'] + $age;
-                    $j['extrapolated'] = true;
-                }
+    if (is_array($fileSync)) {
+        $j = $fileSync;
+        if (isset($j['wall_ms'], $j['seconds']) && is_numeric($j['wall_ms']) && is_numeric($j['seconds']) && $j['seconds'] >= 0) {
+            $age = ($nowWall - (float)$j['wall_ms']) / 1000.0;
+            if ($age >= 0 && $age < 2.0) {
+                $j['extrapolated_seconds'] = (float)$j['seconds'] + $age;
+                $j['extrapolated'] = true;
             }
-            $j['snapshot_wall_ms'] = $nowWall;
-            $sync = llMergeSyncFallback($j, $fallback, $nowMono, $nowWall);
-            $sync = llReanchorMaster($sync, $nowWall);
-            $sync['source'] = 'file';
-            return llJson($sync);
         }
+        $j['snapshot_wall_ms'] = $nowWall;
+        $sync = llApplyTransportToSync($j, $fppStatus, $nowWall);
+        $sync = llReanchorMaster($sync, $nowWall);
+        $sync['source'] = 'file';
+        return llJson($sync);
     }
 
     // Final fallback: status poll — not frame-exact, but sub-second where fppd
     // provides milliseconds_elapsed and extrapolated to response time.
-    $sync = $fallback;
-    $sync['monotonic_ms'] = $nowMono;
-    $sync['wall_ms'] = $nowWall;
-    $sync['epoch_ms'] = $nowWall - $nowMono; // approx
-    $sync['frame'] = $fallback['extrapolated_seconds'] >= 0 ? (int)($fallback['extrapolated_seconds'] * 44100) : -1;
-    $sync['file_type'] = 'fppd-status';
-    $sync['confidence'] = 'unresolved';
-    $sync = llMergeSyncFallback($sync, $fallback, $nowMono, $nowWall);
+    $sync = [
+        'has_media' => $fallback['has_media'],
+        'media' => $fallback['media'],
+        'seconds' => $fallback['seconds'],
+        'extrapolated_seconds' => $fallback['extrapolated_seconds'],
+        'snapshot_wall_ms' => $fallback['snapshot_wall_ms'] ?? $nowWall,
+        'duration' => $fallback['duration'],
+        'file_type' => 'fppd-status',
+        'confidence' => 'unresolved',
+        'clock_source' => 'fppd-status',
+        'monotonic_ms' => $nowMono,
+        'wall_ms' => $nowWall,
+        'frame' => $fallback['extrapolated_seconds'] >= 0 ? (int)($fallback['extrapolated_seconds'] * 44100) : -1,
+    ];
+    $sync = llApplyTransportToSync($sync, $fppStatus, $nowWall);
     $sync = llReanchorMaster($sync, $nowWall);
     $sync['source'] = 'fallback';
     return llJson($sync);
