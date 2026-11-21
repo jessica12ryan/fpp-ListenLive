@@ -519,6 +519,7 @@ var llExactAudio = {
                 return;
             }
             this.pendingCutover = false;
+            if (typeof llPlayer !== 'undefined') llPlayer.endTrackChange();
             this.hardResync(llMasterClock.masterNow(), 'new track', this.targetLatency);
             this.fill();
             return;
@@ -565,6 +566,7 @@ var llExactAudio = {
             this.mediaName = d.media;
             this.transitionUntil = performance.now() + 3000;
             this.driftCount = 0;
+            if (typeof llPlayer !== 'undefined') llPlayer.markTrackChange();
             // Bridge the switch with the native stream, then stop scheduling
             // old content. armAudible() will mute native again when the first
             // exact chunk actually sounds.
@@ -576,6 +578,7 @@ var llExactAudio = {
                 this.status('cutover • waiting for clock');
                 return;
             }
+            if (typeof llPlayer !== 'undefined') llPlayer.endTrackChange();
             this.hardResync(llMasterClock.masterNow(), 'new track', this.targetLatency);
             this.fill();
         }
@@ -1011,6 +1014,15 @@ var llPlayer = {
         llPlayer.userPaused = !!paused;
         if (paused) llPlayer.autoPlayBlocked = false;
     },
+    markTrackChange: function() {
+        llPlayer.trackChangePending = true;
+        clearTimeout(llPlayer.trackChangeTimeout);
+        llPlayer.trackChangeTimeout = setTimeout(function(){ llPlayer.trackChangePending = false; }, 4000);
+    },
+    endTrackChange: function() {
+        clearTimeout(llPlayer.trackChangeTimeout);
+        llPlayer.trackChangePending = false;
+    },
     // FPP reports the show ended. Stop everything cleanly so the native stream
     // cannot fire reconnect/error events while there is nothing to play. A new
     // playlist still auto-starts because userPaused/autoPlayBlocked are cleared.
@@ -1032,6 +1044,8 @@ var llPlayer = {
         clearTimeout(llPlayer.waitingTimer);
         llPlayer.reconnectAttempts = 0;
         llPlayer.trackChangePending = false;
+        llPlayer.idleStatusCount = 0;
+        clearTimeout(llPlayer.trackChangeTimeout);
         try { llExactAudio.stop(); } catch(e) {}
         try { llExact.stop(); } catch(e) {}
         try {
@@ -1547,12 +1561,17 @@ var llPlayer = {
                 var isPlaying = fppPlaying || isBackgroundPlaying;
 
                 // Clean shutdown when FPP finishes and there is no background
-                // music. Two consecutive 1 Hz polls avoid stopping during the
-                // brief gap between playlist items.
-                var isFppIdle = !fppPlaying && !isBackgroundPlaying;
+                // music. Three consecutive 1 Hz polls avoid stopping during the
+                // gap between playlist items; a reported media key also counts
+                // as "not idle" even if status_name briefly flips.
+                var rawPl = s.current_playlist;
+                var plName = typeof rawPl === 'string' ? rawPl : (rawPl && rawPl.playlist ? rawPl.playlist : '');
+                var hasMediaNow = !!((s.current_song && s.current_song !== 'false') ||
+                    (s.current_sequence && s.current_sequence !== 'false') || plName);
+                var isFppIdle = !fppPlaying && !isBackgroundPlaying && !hasMediaNow;
                 llPlayer.fppIdle = isFppIdle;
                 if (isFppIdle) {
-                    if (++llPlayer.idleStatusCount >= 2 && llPlayer.isPlaying &&
+                    if (++llPlayer.idleStatusCount >= 3 && llPlayer.isPlaying &&
                         !llPlayer.reconnecting && !llPlayer.trackChangePending) {
                         llPlayer.onFppIdle('FPP is idle');
                     }
