@@ -213,6 +213,7 @@ namespace {
              'transport exposes song and sequence');
     rt_check($t['media_key'] === 'song.mp3|show.fseq|Saturday|2',
              'media_key includes song, sequence, playlist and item');
+    rt_check(!empty($t['clock_epoch']), 'transport exposes a clock epoch for track changes');
     rt_check(abs((float)$t['elapsed'] - 12.345) < 0.001, 'elapsed uses milliseconds_elapsed');
     rt_check(abs((float)$t['duration'] - 57.345) < 0.001, 'duration derived from elapsed + remaining');
 
@@ -222,6 +223,17 @@ namespace {
     rt_check($unknown['available'] === false && $unknown['playing'] === false, 'unknown transport when fppd unreachable');
     $paused = \LLRuntimeTest\llSyncTransport(['status_name' => 'paused', 'current_song' => 'song.mp3', 'current_sequence' => 'show.fseq'], []);
     rt_check($paused['playing'] === false, 'paused FPP is not treated as playing even with media fields');
+
+    rt_case('clock gate release');
+    $gateT = ['elapsed' => 12.0, 'current_song' => 'song.mp3', 'current_sequence' => 'show.fseq'];
+    rt_check(\LLRuntimeTest\llGateClockReset($gateT, ['media' => 'song.mp3', 'extrapolated_seconds' => 12.3, 'file_type' => 'media'], 1),
+             'gate releases when native and fppd agree for the same song');
+    rt_check(!\LLRuntimeTest\llGateClockReset($gateT, ['media' => 'song.mp3', 'extrapolated_seconds' => 95.0, 'file_type' => 'media'], 1),
+             'gate stays closed while the native clock is stale');
+    rt_check(!\LLRuntimeTest\llGateClockReset($gateT, ['media' => 'old.mp3', 'extrapolated_seconds' => 12.1, 'file_type' => 'media'], 1),
+             'gate stays closed while native media does not match');
+    rt_check(\LLRuntimeTest\llGateClockReset($gateT, ['media' => 'old.mp3', 'extrapolated_seconds' => 95.0, 'file_type' => 'media'], 11),
+             'gate times out rather than hanging forever');
 
     rt_case('apply transport to sync');
     $base = [

@@ -146,6 +146,7 @@ var llMasterClock = {
     source: '?',
     confidence: 'unresolved',
     transport: null,
+    epoch: null,
     reset: function() {
         this.samples = [];
         this.offset = null;
@@ -155,9 +156,21 @@ var llMasterClock = {
         this.source = '?';
         this.confidence = 'unresolved';
         this.transport = null;
+        this.epoch = null;
     },
     observe: function(d, t0, t1) {
-        if (!d || typeof d.master_seconds !== 'number' || d.master_seconds < 0) return false;
+        if (!d) return false;
+        // A track/sequence change is a new clock epoch. Record it BEFORE any
+        // position check so a transient -1 master cannot hide the switch.
+        var epoch = (d.transport && d.transport.clock_epoch) || d.clock_epoch || '';
+        if (epoch && this.epoch && epoch !== this.epoch) {
+            this.samples = [];
+            this.bestSample = null;
+            this.offset = null;          // snap on the next line, never slew across an epoch
+        }
+        if (epoch) this.epoch = epoch;
+        if (d.transport) this.transport = d.transport;
+        if (typeof d.master_seconds !== 'number' || d.master_seconds < 0) return false;
         var rtt = Math.max(0, t1 - t0);
         // master_seconds is taken at server response time; add half the RTT.
         var masterAtRecv = d.master_seconds + rtt / 2000;
@@ -200,7 +213,6 @@ var llMasterClock = {
         this.rtt = rtt;
         this.source = d.source || '?';
         this.confidence = d.confidence || 'unresolved';
-        this.transport = d.transport || null;
         return true;
     },
     masterNow: function() {
@@ -740,6 +752,12 @@ var llExactAudio = {
             if (!self.scheduleBlock(new Int16Array(res.buf), sr, ch, startWhen, startSeek)) {
                 throw new Error('prime returned no slices');
             }
+            if (self.ctx.state === 'suspended') {
+                self.fetching = 0;
+                self.needPrime = false;
+                llPlayer.handlePlayError({ name: 'NotAllowedError', message: 'AudioContext suspended' });
+                return;
+            }
             self.fetching = 0;
             self.failCount = 0;
             self.needPrime = false;
@@ -882,6 +900,8 @@ var llPlayer = {
     // Explicit user Pause: poll-driven auto-play must not undo it.
     userPaused: false,
     autoPlayBlocked: false,
+    gestureRetryAdded: false,
+    lastGestureStart: 0,
     // Deadline-at-read: monotonic timestamp of last media change for confidence
     lastMediaAnnouncedAtMono: null,
     lastElapsedHalf: null,
@@ -1136,6 +1156,7 @@ var llPlayer = {
                 if (p && p.catch) p.catch(function(){});
             }
         });
+        llPlayer.installGestureRetry();
         llPlayer.refreshStatus();
         // 1 Hz: /status is only display state. The exact clock polls /sync at
         // 4 Hz on its own; doubling up on status was pure CPU load.
@@ -1184,6 +1205,50 @@ var llPlayer = {
         }
     },
 
+    // Attempt auto-start on page load. Web Audio is tried first: some browsers
+    // allow an AudioContext even when they block <audio> autoplay. The native
+    // stream is still requested as the fallback transport.
+    autoPlay: function() {
+        var a = llPlayer.audio;
+        llPlayer.isPlaying = true;
+        llPlayer.setUserPaused(false);
+        llPlayer.autoPlayBlocked = false;
+        llPlayer.nativeSuspended = false;
+        $('#ll_status_text').html('<span class="text-success">Connecting...</span>');
+        if (llExactAudio.useAudio && window.AudioContext) {
+            try { llExactAudio.start(); } catch(e) { console.warn('exact autoStart failed', e); }
+        }
+        if (!a.src || a.src === window.location.href) {
+            a.src = llPlayer.buildUrl();
+            a.load();
+        }
+        var p = a.play();
+        if (p && p.catch) {
+            p.catch(function(e) {
+                // Exact engine already running: the muted native stream is
+                // irrelevant, so do not show a tap prompt.
+                if (llExactAudio.active) return;
+                llPlayer.handlePlayError(e);
+            });
+        }
+        llPlayer.initialConnect = true;
+        clearTimeout(llPlayer.initialConnectTimer);
+        llPlayer.initialConnectTimer = setTimeout(function(){ llPlayer.initialConnect = false; }, 5000);
+    },
+
+    // Browser policy fallback: resume on the user's first interaction anywhere
+    // on the page, not just on the small button.
+    installGestureRetry: function() {
+        if (llPlayer.gestureRetryAdded) return;
+        llPlayer.gestureRetryAdded = true;
+        var retry = function() {
+            if (!llPlayer.autoPlayBlocked) return;
+            llPlayer.enableAudioFromGesture();
+        };
+        document.addEventListener('pointerdown', retry);
+        document.addEventListener('keydown', retry);
+    },
+
     handlePlayError: function(e) {
         llPlayer.initialConnect = false;
         llPlayer.isPlaying = false;
@@ -1200,6 +1265,8 @@ var llPlayer = {
     },
 
     enableAudioFromGesture: function() {
+        if (Date.now() - llPlayer.lastGestureStart < 500) return;
+        llPlayer.lastGestureStart = Date.now();
         $('#ll_enable_audio').hide();
         llPlayer.autoPlayBlocked = false;
         llPlayer.setUserPaused(false);
@@ -1386,7 +1453,7 @@ var llPlayer = {
                 if (settings.enabled && isPlaying && media && media !== 'false' &&
                     !llPlayer.isPlaying && !llPlayer.userPaused &&
                     !llPlayer.autoPlayBlocked && !llPlayer.reconnecting) {
-                    llPlayer.play();
+                    llPlayer.autoPlay();
                 }
                 // Background/after-hours for UI badge only (stream is live capture, not file)
                 // isBackgroundPlaying already set from background_status/afterhours_status above

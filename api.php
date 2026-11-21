@@ -1836,7 +1836,24 @@ function llSyncTransport($fppStatus, array $sync = []) {
         'elapsed' => $elapsed,
         'seconds_remaining' => $remaining,
         'duration' => $duration,
+        'clock_epoch' => substr(md5($song . '|' . $seq . '|' . $pl . '|' . (string)$item), 0, 12),
     ];
+}
+
+// A transition is over only when the native clock has actually restarted AND
+// agrees with fppd's position for the new media. Releasing on native < 1s
+// alone lets the clock jump mid-block and cut off playback a few seconds after
+// a track change.
+function llGateClockReset(array $t, array $sync, $ageSeconds) {
+    $nativePos = isset($sync['extrapolated_seconds']) && is_numeric($sync['extrapolated_seconds'])
+        ? (float)$sync['extrapolated_seconds']
+        : ((isset($sync['seconds']) && is_numeric($sync['seconds'])) ? (float)$sync['seconds'] : -1.0);
+    $fppPos = $t['elapsed'] !== null ? (float)$t['elapsed'] : -1.0;
+    $expected = ($sync['file_type'] ?? '') === 'sequence' ? (string)($t['current_sequence'] ?? '') : (string)($t['current_song'] ?? '');
+    $nativeMedia = (string)($sync['media'] ?? '');
+    $mediaOk = $expected === '' || $nativeMedia === '' || $nativeMedia === $expected;
+    $agree = $nativePos >= 0 && $fppPos >= 0 && abs($nativePos - $fppPos) <= 1.0;
+    return ($mediaOk && $agree) || $ageSeconds > 10.0;
 }
 
 // Attach fppd transport state to a native/file sync payload, map a sequence
@@ -1887,6 +1904,7 @@ function llApplyTransportToSync(array $sync, $fppStatus, $nowWall) {
         if ($t['duration'] !== null) $sync['duration'] = $t['duration'];
     }
     $sync['has_duration'] = isset($sync['duration']) && is_numeric($sync['duration']) && (float)$sync['duration'] > 0;
+    $sync['clock_epoch'] = $t['clock_epoch'];
     $sync['transport'] = $t;
     return $sync;
 }
@@ -1912,11 +1930,8 @@ function llTransportGate($fppStatus, array $sync, $nowMs) {
     }
     $pending = !empty($state['pending']);
     if ($pending) {
-        $nativePos = isset($sync['extrapolated_seconds']) && is_numeric($sync['extrapolated_seconds'])
-            ? (float)$sync['extrapolated_seconds']
-            : ((isset($sync['seconds']) && is_numeric($sync['seconds'])) ? (float)$sync['seconds'] : -1.0);
         $age = ($nowMs - (float)($state['at'] ?? $nowMs)) / 1000.0;
-        if (($nativePos >= 0 && $nativePos < 1.0) || $age > 10.0) {
+        if (llGateClockReset($t, $sync, $age)) {
             $pending = false;
             $state['pending'] = false;
         }
