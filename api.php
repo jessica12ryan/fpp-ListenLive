@@ -63,6 +63,27 @@ function llAtomicJsonWrite($path, array $data) {
     return true;
 }
 
+// Writable location for internal caches. The native build creates the plugin's
+// plugindata directory as root:root 0755 on some FPP images, while PHP-FPM runs
+// as the FPP user and cannot write there. Try a sibling under plugindata first
+// (parent is normally FPP-owned), then a namespaced temp dir. Only internal
+// caches live here — the native ll_sync.json handoff file stays in plugindata.
+function llGetCacheDir() {
+    static $dir = null;
+    if ($dir !== null) return $dir;
+    $primary = llGetPlugindataDir();
+    if (is_dir($primary) && is_writable($primary)) return $dir = $primary;
+    $parent = dirname($primary);
+    $fallback = $parent . '/fpp-ListenLive-cache';
+    if (!is_dir($fallback)) @mkdir($fallback, 0775, true);
+    if (is_dir($fallback) && is_writable($fallback)) return $dir = $fallback;
+    $uid = function_exists('posix_geteuid') ? posix_geteuid() : (int)getmyuid();
+    $tmp = rtrim(sys_get_temp_dir(), '/') . '/fpp-listenlive-' . $uid;
+    if (!is_dir($tmp)) @mkdir($tmp, 0700, true);
+    if (is_dir($tmp) && is_writable($tmp)) return $dir = $tmp;
+    return $dir = $primary;
+}
+
 function llEnsureCommonLoaded() {
     if (function_exists('ReadSettingFromFile') && function_exists('WriteSettingToFile')) return true;
     // api.php runs outside the FPP page include — pull in common.php for the stable settings API (§3.1)
@@ -172,7 +193,7 @@ function llMediaDuration($media) {
     static $memo = [];
     if (!is_string($media) || $media === '' || $media === 'false') return 0.0;
     if (array_key_exists($media, $memo)) return $memo[$media];
-    $cacheFile = llGetPlugindataDir() . '/ll_durations.json';
+    $cacheFile = llGetCacheDir() . '/ll_durations.json';
     $cache = is_readable($cacheFile) ? @json_decode(@file_get_contents($cacheFile), true) : [];
     if (!is_array($cache)) $cache = [];
     if (isset($cache[$media]) && is_numeric($cache[$media])) {
@@ -203,7 +224,7 @@ function llDetectAudioSources($forceRefresh = false) {
     // function runs ffmpeg/pactl/arecord probes each time; re-running it on
     // every poll starves the PCM chunk ffmpeg processes on a Pi. A short TTL
     // keeps the UI honest without the constant shell-out storm.
-    $cacheFile = llGetPlugindataDir() . '/ll_detection.json';
+    $cacheFile = llGetCacheDir() . '/ll_detection.json';
     $cacheVersion = 2;
     if (!$forceRefresh && is_readable($cacheFile)) {
         $age = time() - (int)@filemtime($cacheFile);
@@ -401,7 +422,7 @@ function llGetFppStatus($maxAgeMs = 1000) {
     if ($memo !== null && $maxAgeMs > 0 && (($now - $memoAt) * 1000.0) < $maxAgeMs) {
         return $memo;
     }
-    $cacheFile = llGetPlugindataDir() . '/ll_fpp_status.json';
+    $cacheFile = llGetCacheDir() . '/ll_fpp_status.json';
     if ($maxAgeMs > 0 && is_readable($cacheFile)) {
         $wrapped = @json_decode(@file_get_contents($cacheFile), true);
         if (is_array($wrapped) && isset($wrapped['at'], $wrapped['data']) && is_array($wrapped['data'])) {
@@ -1870,6 +1891,74 @@ function llApplyTransportToSync(array $sync, $fppStatus, $nowWall) {
     return $sync;
 }
 
+// Track a transport media-key change until the native clock restarts. fppd
+// flips current_song immediately; MultiSync can still report the previous
+// track's position for a poll or two. Without this gate a cutover seeks past
+// the new file's duration and the scheduler never fetches a chunk.
+function llTransportGate($fppStatus, array $sync, $nowMs) {
+    $t = llSyncTransport($fppStatus, $sync);
+    $cacheFile = llGetCacheDir() . '/ll_transport.json';
+    $state = is_readable($cacheFile) ? @json_decode(@file_get_contents($cacheFile), true) : [];
+    if (!is_array($state)) $state = [];
+    $original = $state;
+    $key = (string)($t['media_key'] ?? '');
+    $prev = (string)($state['key'] ?? '');
+    if ($prev !== '' && $key !== $prev) {
+        $state = ['key' => $key, 'at' => $nowMs, 'pending' => true];
+    } elseif ($prev === '') {
+        $state = ['key' => $key, 'at' => $nowMs, 'pending' => false];
+    } else {
+        $state['key'] = $key;
+    }
+    $pending = !empty($state['pending']);
+    if ($pending) {
+        $nativePos = isset($sync['extrapolated_seconds']) && is_numeric($sync['extrapolated_seconds'])
+            ? (float)$sync['extrapolated_seconds']
+            : ((isset($sync['seconds']) && is_numeric($sync['seconds'])) ? (float)$sync['seconds'] : -1.0);
+        $age = ($nowMs - (float)($state['at'] ?? $nowMs)) / 1000.0;
+        if (($nativePos >= 0 && $nativePos < 1.0) || $age > 10.0) {
+            $pending = false;
+            $state['pending'] = false;
+        }
+    }
+    if ($state !== $original) llAtomicJsonWrite($cacheFile, $state);
+    return [$t, $pending];
+}
+
+// Apply a pending transport transition to the master position. fppd's
+// sub-second elapsed is the only safe seed until the native clock restarts.
+function llApplyTransportGate(array $sync, array $t, $pending, $nowWall) {
+    if (!$pending) return $sync;
+    $seed = $t['elapsed'] !== null ? (float)$t['elapsed'] : -1.0;
+    if ($seed < 0 && isset($sync['extrapolated_seconds']) && is_numeric($sync['extrapolated_seconds'])) {
+        $seed = (float)$sync['extrapolated_seconds'];
+    }
+    $sync['clock_reset_pending'] = true;
+    $sync['confidence'] = 'unresolved';
+    $sync['snapshot_wall_ms'] = $nowWall;
+    if ($seed >= 0) {
+        $sync['master_seconds'] = $seed;
+        $sync['seconds'] = $seed;
+        $sync['extrapolated_seconds'] = $seed;
+        $sync['sync_age_ms'] = 0;
+    } else {
+        $sync['master_seconds'] = -1;
+    }
+    return $sync;
+}
+
+function llFinishSync(array $raw, $fppStatus, $nowWall, $source) {
+    // Gate first: it needs the native clock before transport mapping rewrites
+    // media/seconds for a sequence.
+    list($t, $pending) = llTransportGate($fppStatus, $raw, $nowWall);
+    $sync = llApplyTransportToSync($raw, $fppStatus, $nowWall);
+    if ($pending) $sync = llApplyTransportGate($sync, $t, $pending, $nowWall);
+    $sync = llReanchorMaster($sync, $nowWall);
+    $sync['source'] = $source;
+    if ($pending) $sync['clock_reset_pending'] = true;
+    return llJson($sync);
+}
+
 function llSyncEndpoint() {
     // Never 503 here: sync precision degrades (c++ -> file -> status poll)
     // instead of failing. JS polls this while playing; a 503 breaks exact sync.
@@ -1890,15 +1979,10 @@ function llSyncEndpoint() {
         }
     }
 
-    // 2) Transport: one cached fppd status. At a sequence change, force a
-    //    fresh read so current_song maps to the new sequence immediately.
+    // 2) Transport: one cached fppd status. Never force a fresh read here —
+    //    a slow fppd probe would make the clock response late and starve the
+    //    chunk queue. The transition gate below handles the brief lag.
     $fppStatus = llGetFppStatus(500);
-    if (is_array($cppSync) && ($cppSync['file_type'] ?? '') === 'sequence' && is_array($fppStatus)) {
-        $seqNow = $fppStatus['current_sequence'] ?? '';
-        if ($seqNow !== '' && $seqNow !== ($cppSync['media'] ?? '')) {
-            $fppStatus = llGetFppStatus(0);
-        }
-    }
 
     // 3) File written by the C++ plugin (plugindata only — never /tmp).
     $fileSync = null;
@@ -1923,10 +2007,7 @@ function llSyncEndpoint() {
         $cppSync['snapshot_wall_ms'] = isset($cppSync['wall_ms']) && is_numeric($cppSync['wall_ms'])
             ? (float)$cppSync['wall_ms'] : (float)$nowWall;
         $cppSync['native_wall_ms'] = $cppSync['snapshot_wall_ms'];
-        $sync = llApplyTransportToSync($cppSync, $fppStatus, $nowWall);
-        $sync = llReanchorMaster($sync, $nowWall);
-        $sync['source'] = 'c++';
-        return llJson($sync);
+        return llFinishSync($cppSync, $fppStatus, $nowWall, 'c++');
     }
 
     if (is_array($fileSync)) {
@@ -1939,10 +2020,7 @@ function llSyncEndpoint() {
             }
         }
         $j['snapshot_wall_ms'] = $nowWall;
-        $sync = llApplyTransportToSync($j, $fppStatus, $nowWall);
-        $sync = llReanchorMaster($sync, $nowWall);
-        $sync['source'] = 'file';
-        return llJson($sync);
+        return llFinishSync($j, $fppStatus, $nowWall, 'file');
     }
 
     // Final fallback: status poll — not frame-exact, but sub-second where fppd
@@ -1961,10 +2039,7 @@ function llSyncEndpoint() {
         'wall_ms' => $nowWall,
         'frame' => $fallback['extrapolated_seconds'] >= 0 ? (int)($fallback['extrapolated_seconds'] * 44100) : -1,
     ];
-    $sync = llApplyTransportToSync($sync, $fppStatus, $nowWall);
-    $sync = llReanchorMaster($sync, $nowWall);
-    $sync['source'] = 'fallback';
-    return llJson($sync);
+    return llFinishSync($sync, $fppStatus, $nowWall, 'fallback');
 }
 
 function llClockEndpoint() {

@@ -140,6 +140,7 @@ var llMasterClock = {
     samples: [],
     offset: null,          // master_seconds - performance.now()/1000
     offsetRtt: 0,          // RTT of the sample that produced offset
+    bestSample: null,
     rtt: 0,
     source: '?',
     confidence: 'unresolved',
@@ -148,6 +149,7 @@ var llMasterClock = {
         this.samples = [];
         this.offset = null;
         this.offsetRtt = 0;
+        this.bestSample = null;
         this.rtt = 0;
         this.source = '?';
         this.confidence = 'unresolved';
@@ -161,28 +163,36 @@ var llMasterClock = {
         var offset = masterAtRecv - t1 / 1000;
         this.samples.push({ offset: offset, rtt: rtt, at: t1 });
         if (this.samples.length > 40) this.samples.shift();
-        // NTP-style: the lowest-RTT sample has the least queueing delay.
-        var best = null;
+        // NTP-style: the lowest-RTT sample has the least queueing delay. Keep
+        // the chosen sample with hysteresis — swapping to a marginally faster
+        // sample changes its offset and shows up as an audible content skip.
+        var fresh = null;
         for (var i = 0; i < this.samples.length; i++) {
             var s = this.samples[i];
             if (t1 - s.at > 10000) continue;
-            if (!best || s.rtt < best.rtt) best = s;
+            if (!fresh || s.rtt < fresh.rtt) fresh = s;
         }
-        if (!best) best = this.samples[this.samples.length - 1];
+        if (!fresh) fresh = this.samples[this.samples.length - 1];
+        var best = this.bestSample;
+        if (!best || (t1 - best.at) > 10000) {
+            best = fresh;
+        } else if (fresh && fresh !== best && fresh.rtt < best.rtt * 0.8 &&
+                   Math.abs(fresh.offset - best.offset) < 0.02) {
+            best = fresh;
+        }
+        this.bestSample = best;
         if (this.offset === null) {
             this.offset = best.offset;
             this.offsetRtt = best.rtt;
         } else {
             var delta = best.offset - this.offset;
-            // Do NOT chase every sample. Moving the offset changes the master
-            // estimate, which the scheduler then "fixes" by skipping audio —
-            // that is the periodic chop. Hold steady unless the measurement
-            // is materially better or disagrees badly.
-            if (Math.abs(delta) > 0.1) {
-                this.offset = best.offset;
+            // Slew, never step. A 100 ms step here becomes a 100 ms content
+            // nudge in correct(), which is the recurring chop.
+            if (Math.abs(delta) > 0.003) {
+                var step = Math.min(0.005, Math.abs(delta) * 0.25);
+                this.offset += delta > 0 ? step : -step;
                 this.offsetRtt = best.rtt;
-            } else if (best.rtt < this.offsetRtt * 0.7 && Math.abs(delta) > 0.003) {
-                this.offset += delta * 0.5;
+            } else if (best.rtt < this.offsetRtt * 0.8) {
                 this.offsetRtt = best.rtt;
             }
         }
@@ -264,10 +274,13 @@ var llExactAudio = {
     idleCount: 0,
     endedState: false,
     chunkSeconds: 0.5,
+    blockSeconds: 4.0,
     targetLatency: 0.5,
     prefetchDepth: 2.0,
     nextSeek: -1,
     nextWhen: 0,
+    transitionUntil: 0,
+    driftCount: 0,
     scheduled: [],
     generation: 0,
     fetching: 0,
@@ -365,6 +378,8 @@ var llExactAudio = {
         this.polling = false;
         this.nextSeek = -1;
         this.nextWhen = 0;
+        this.transitionUntil = 0;
+        this.driftCount = 0;
         this.scheduled = [];
         this.generation++;
         llMasterClock.reset();
@@ -437,21 +452,24 @@ var llExactAudio = {
 
     onSync: function(d) {
         var t = (d && d.transport) ? d.transport : null;
+        var inTransition = performance.now() < this.transitionUntil;
         if (t && t.available && t.playing === false) {
-            // Confirm over two polls so a brief gap between playlist items does
-            // not look like the end of the show.
-            if (++this.idleCount >= 2) {
-                if (this.anchored) this.ended(t.status_name || 'stopped');
+            // Confirm over >=1 s (4 polls). A gap between playlist items must
+            // never look like the end of the show, especially in a cutover.
+            if (++this.idleCount >= 4) {
+                if (this.anchored && !inTransition) this.ended(t.status_name || 'stopped');
             }
             return;
         }
         if (!d || !d.has_media || !d.media) {
             if (t && t.available && t.playing) {
-                if (++this.idleCount >= 2 && this.anchored) this.ended('sequence (no audio)');
+                // A sequence with no song can be a transient handoff state.
+                // Wait 2 s and never end while a cutover is in progress.
+                if (++this.idleCount >= 8 && this.anchored && !inTransition) this.ended('sequence (no audio)');
                 return;
             }
-            if (++this.idleCount >= 4) {
-                if (this.anchored) this.ended('no media');
+            if (++this.idleCount >= 8) {
+                if (this.anchored && !inTransition) this.ended('no media');
                 else $('#ll_exact_status').text('exact • idle • waiting for next track');
             }
             return;
@@ -461,6 +479,7 @@ var llExactAudio = {
         this.endedState = false;
         this.lastSync = d;
         var key = (t && t.media_key) ? t.media_key : d.media;
+        if (d.clock_reset_pending) this.transitionUntil = performance.now() + 3000;
         if (!this.anchored) {
             this.mediaKey = key;
             this.mediaName = d.media;
@@ -473,9 +492,22 @@ var llExactAudio = {
             // the same "new" track and tears the queue down forever.
             this.mediaKey = key;
             this.mediaName = d.media;
-            this.hardResync(llMasterClock.masterNow(), 'new track', 0.12);
+            this.transitionUntil = performance.now() + 3000;
+            this.driftCount = 0;
+            // The server clamps master_seconds to fppd elapsed until the native
+            // clock restarts, so this seek cannot land past the new file's EOF.
+            this.hardResync(llMasterClock.masterNow(), 'new track', this.cutoverLead());
             this.fill();
         }
+    },
+
+    // Start the new track exactly where the audible chunk ends instead of a
+    // fixed 120 ms later. Removes the cutover gap without adding latency.
+    cutoverLead: function() {
+        if (!this.ctx) return this.targetLatency;
+        var active = this.activeSource(this.ctx.currentTime);
+        if (active) return Math.max(0.02, active.end - this.ctx.currentTime + 0.01);
+        return this.targetLatency;
     },
 
     reanchor: function() {
@@ -487,6 +519,7 @@ var llExactAudio = {
         this.nextWhen = this.ctx.currentTime + this.targetLatency;
         this.anchored = true;
         this.drift = 0;
+        this.driftCount = 0;
         this.driftHist = [];
     },
 
@@ -507,8 +540,15 @@ var llExactAudio = {
         var audible = active ? (active.seek + (now - active.when)) - m : 0;
         this.drift = audible;
         if (active && Math.abs(audible) >= this.resyncThreshold) {
-            this.hardResync(m, 'drift ' + audible.toFixed(2) + 's', 0.15);
-            return true;
+            // Require a persistent error. One noisy clock sample must never
+            // trigger a 150 ms fade/tear-down (that was the ~3 s chop).
+            if (++this.driftCount >= 3) {
+                this.hardResync(m, 'drift ' + audible.toFixed(2) + 's', this.targetLatency);
+                this.driftCount = 0;
+                return true;
+            }
+        } else {
+            this.driftCount = 0;
         }
         // Frontier drift is what the next chunk would play. Median-filter it so
         // one noisy clock sample cannot cause an audible content skip.
@@ -540,6 +580,7 @@ var llExactAudio = {
         this.anchored = true;
         this.resyncs++;
         this.drift = 0;
+        this.driftCount = 0;
         this.driftHist = [];
         this.status('resync ' + reason);
     },
@@ -607,7 +648,11 @@ var llExactAudio = {
             return setTimeout(function() { self.fill(); }, 250);
         }
         var seek = Math.max(0, Math.round(this.nextSeek * 1000) / 1000);
-        var want = this.chunkSeconds;
+        // One ffmpeg process decodes a multi-second block; the browser slices
+        // it into sample-contiguous 0.5 s AudioBuffers. This removes the
+        // per-chunk process-start jitter that caused ~3 s choppiness, without
+        // changing when the first sample becomes audible.
+        var want = this.blockSeconds;
         if (duration > 0 && seek + want > duration) want = Math.max(0.02, duration - seek + 0.03);
         var when = this.nextWhen;
         var gen = this.generation;
@@ -630,19 +675,41 @@ var llExactAudio = {
             var sr = res.info.sr, ch = res.info.ch;
             if (ch < 1 || ch > 2 || sr < 8000) throw new Error('bad PCM headers');
             var pcm = new Int16Array(res.buf);
-            var frames = Math.floor(pcm.length / ch);
-            if (frames < 256) throw new Error('empty PCM chunk');
-            var ab = self.ctx.createBuffer(ch, frames, sr);
-            for (var c = 0; c < ch; c++) {
-                var out = ab.getChannelData(c);
-                for (var i = 0; i < frames; i++) out[i] = pcm[i * ch + c] / 32768;
-            }
-            var actual = frames / sr;
+            var totalFrames = Math.floor(pcm.length / ch);
+            if (totalFrames < 256) throw new Error('empty PCM chunk');
+            var stepFrames = Math.max(1, Math.floor(this.chunkSeconds * sr));
             var now2 = self.ctx.currentTime;
-            if (when < now2 + 0.005) {
-                // Fetch took longer than the lead. Do not play stale content
-                // and do not tear down the whole queue: re-anchor the frontier
-                // to the master, starting when the audible chunk ends.
+            var frame = 0, cursorWhen = when, cursorSeek = seek, scheduledAny = false;
+            while (frame < totalFrames) {
+                var frames = Math.min(stepFrames, totalFrames - frame);
+                var dur = frames / sr;
+                // If a slice is already in the past, advance content time with
+                // it instead of playing stale audio. The next slice stays
+                // sample-contiguous with the master clock.
+                var lateSlice = cursorWhen < now2 + 0.005;
+                frame += frames;
+                cursorWhen += dur;
+                cursorSeek += dur;
+                if (lateSlice) { self.late++; continue; }
+                var ab = self.ctx.createBuffer(ch, frames, sr);
+                for (var c = 0; c < ch; c++) {
+                    var out = ab.getChannelData(c);
+                    for (var i = 0; i < frames; i++) out[i] = pcm[(frame - frames + i) * ch + c] / 32768;
+                }
+                var src = self.ctx.createBufferSource();
+                src.buffer = ab;
+                var g = self.ctx.createGain();
+                g.gain.value = 1;
+                src.connect(g);
+                g.connect(self.gain || self.ctx.destination);
+                src.start(cursorWhen - dur);
+                self.scheduled.push({ when: cursorWhen - dur, end: cursorWhen, seek: cursorSeek - dur, src: src, gain: g });
+                scheduledAny = true;
+            }
+            if (!scheduledAny) {
+                // Whole block arrived too late. Re-anchor the frontier to the
+                // master starting when the audible chunk ends; never tear down
+                // the existing queue.
                 self.fetching = 0;
                 self.late++;
                 var active = self.activeSource(now2);
@@ -657,18 +724,8 @@ var llExactAudio = {
                 setTimeout(function() { self.fill(); }, 10);
                 return;
             }
-            var src = self.ctx.createBufferSource();
-            src.buffer = ab;
-            // Chunks are sample-contiguous; a per-source gain exists only so a
-            // resync can fade that chunk out cleanly.
-            var g = self.ctx.createGain();
-            g.gain.value = 1;
-            src.connect(g);
-            g.connect(self.gain || self.ctx.destination);
-            src.start(when);
-            self.scheduled.push({ when: when, end: when + actual, seek: seek, src: src, gain: g });
-            self.nextSeek += actual;
-            self.nextWhen += actual;
+            self.nextSeek = cursorSeek;
+            self.nextWhen = cursorWhen;
             self.fetching = 0;
             self.failCount = 0;
             if (!self.audible) {

@@ -251,6 +251,19 @@ namespace {
     rt_check(abs((float)$re['master_seconds'] - 10.25) < 0.001 && $re['sync_age_ms'] === 250,
              'master_seconds advanced by response age');
 
+    rt_case('transport gate');
+    $gated = \LLRuntimeTest\llApplyTransportGate([
+        'has_media' => true, 'media' => 'old.mp3',
+        'seconds' => 95.0, 'extrapolated_seconds' => 95.0, 'master_seconds' => 95.0,
+    ], ['elapsed' => 12.5], true, 1000);
+    rt_check(!empty($gated['clock_reset_pending']) && $gated['confidence'] === 'unresolved',
+             'pending transition is not claimed exact');
+    rt_check(abs((float)$gated['master_seconds'] - 12.5) < 0.001,
+             'transition master is seeded from fppd elapsed, not the stale native clock');
+    $cacheDir = \LLRuntimeTest\llGetCacheDir();
+    rt_check(is_string($cacheDir) && is_dir($cacheDir) && is_writable($cacheDir),
+             'cache directory is writable even when plugindata is root-owned');
+
     if ($rt_failures === 0) {
         echo "glue_runtime_test: all checks passed\n";
         exit(0);

@@ -24,7 +24,12 @@ fi
 # WriteSettingToFile(); we never create config/settings.json in the plugin dir.
 PLUGINDATA_DIR="${MEDIADIR:-/home/fpp/media}/plugindata/fpp-ListenLive"
 mkdir -p "$PLUGINDATA_DIR" 2>/dev/null || true
-chmod 0755 "$PLUGINDATA_DIR" 2>/dev/null || true
+chmod 0775 "$PLUGINDATA_DIR" 2>/dev/null || true
+# PHP-FPM runs as the FPP user. A root-owned plugindata dir silently breaks the
+# API's atomic cache writes (ffprobe/detection then run on every request).
+if [ "$(id -u)" = "0" ] && id -u fpp >/dev/null 2>&1; then
+    chown fpp:fpp "$PLUGINDATA_DIR" 2>/dev/null || true
+fi
 
 # One-time migration: move a legacy plugin-local config/settings.json into
 # plugindata so it survives a reinstall. It is NOT restored into the plugin dir.
