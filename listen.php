@@ -147,6 +147,7 @@ var llMasterClock = {
     confidence: 'unresolved',
     transport: null,
     epoch: null,
+    acquiredAt: 0,
     reset: function() {
         this.samples = [];
         this.offset = null;
@@ -157,6 +158,7 @@ var llMasterClock = {
         this.confidence = 'unresolved';
         this.transport = null;
         this.epoch = null;
+        this.acquiredAt = 0;
     },
     observe: function(d, t0, t1) {
         if (!d) return false;
@@ -167,7 +169,9 @@ var llMasterClock = {
             this.samples = [];
             this.bestSample = null;
             this.offset = null;          // snap on the next line, never slew across an epoch
+            this.acquiredAt = t1;        // brief fast-acquisition window after a track change
         }
+        if (epoch && !this.epoch) this.acquiredAt = t1;
         if (epoch) this.epoch = epoch;
         if (d.transport) this.transport = d.transport;
         if (typeof d.master_seconds !== 'number' || d.master_seconds < 0) return false;
@@ -203,7 +207,10 @@ var llMasterClock = {
             // Slew, never step. A 100 ms step here becomes a 100 ms content
             // nudge in correct(), which is the recurring chop.
             if (Math.abs(delta) > 0.003) {
-                var step = Math.min(0.005, Math.abs(delta) * 0.25);
+                var acquiring = this.acquiredAt && (t1 - this.acquiredAt) < 2000;
+                var maxStep = acquiring ? 0.02 : 0.005;
+                var fraction = acquiring ? 0.5 : 0.25;
+                var step = Math.min(maxStep, Math.abs(delta) * fraction);
                 this.offset += delta > 0 ? step : -step;
                 this.offsetRtt = best.rtt;
             } else if (best.rtt < this.offsetRtt * 0.8) {
@@ -310,7 +317,10 @@ var llExactAudio = {
     resyncs: 0,
     nudges: 0,
     late: 0,
-    nudgeThreshold: 0.03,
+    nudgeThreshold: 0.02,
+    acquireNudgeThreshold: 0.012,
+    maxNudge: 0.008,
+    catchups: 0,
     resyncThreshold: 0.15,
     syncTimer: null,
     visHandler: null,
@@ -391,6 +401,7 @@ var llExactAudio = {
         this.driftHist = [];
         this.resyncs = 0;
         this.nudges = 0;
+        this.catchups = 0;
         this.late = 0;
         this.failCount = 0;
         this.idleCount = 0;
@@ -617,13 +628,19 @@ var llExactAudio = {
         // one noisy clock sample cannot cause an audible content skip.
         var frontier = (this.nextSeek - (this.nextWhen - now)) - m;
         this.driftHist.push(frontier);
-        if (this.driftHist.length > 5) this.driftHist.shift();
-        if (this.driftHist.length < 3) return false;
+        if (this.driftHist.length > 3) this.driftHist.shift();
+        if (this.driftHist.length < 2) return false;
         var sorted = this.driftHist.slice().sort(function(a, b) { return a - b; });
         var med = sorted[Math.floor(sorted.length / 2)];
-        if (Math.abs(med) >= this.nudgeThreshold) {
-            this.nextSeek -= med;
+        var acquiring = llMasterClock.acquiredAt && (performance.now() - llMasterClock.acquiredAt) < 2000;
+        var threshold = acquiring ? this.acquireNudgeThreshold : this.nudgeThreshold;
+        if (Math.abs(med) >= threshold) {
+            // Cap the step: trim small errors over a few polls instead of one
+            // audible content jump.
+            var nudge = Math.max(-this.maxNudge, Math.min(this.maxNudge, med));
+            this.nextSeek -= nudge;
             this.nudges++;
+            this.catchups++;
             this.driftHist = [];
         }
         return false;
@@ -904,6 +921,7 @@ var llExactAudio = {
             ' rtt ' + llMasterClock.rtt.toFixed(0) + 'ms' +
             (this.resyncs ? ' rs ' + this.resyncs : '') +
             (this.nudges ? ' n ' + this.nudges : '') +
+            (this.catchups ? ' ca ' + this.catchups : '') +
             (this.late ? ' late ' + this.late : '');
         $('#ll_exact_status').text(txt);
     }
