@@ -84,7 +84,7 @@ $showDevTab = $uiLevel >= 3;
                 <div class="ll-controls">
                     <input type="button" class="buttons" id="ll_btn_play" value="▶ Play" onclick="llPlayer.play();">
                     <input type="button" class="buttons" id="ll_btn_stop" value="■ Stop" onclick="llPlayer.stop();">
-                    <input type="button" class="buttons" value="↻ Reconnect" onclick="llPlayer.reconnect();">
+                    <input type="button" class="buttons" value="↻ Reconnect" onclick="llPlayer.reconnect(true);">
                 </div>
 
                 <div class="ll-volume">
@@ -513,7 +513,7 @@ var llExactAudio = {
                 return;
             }
             this.lastSync = d;
-            this.transitionUntil = performance.now() + 3000;
+            this.transitionUntil = performance.now() + 6000;
             if (d && d.clock_reset_pending) {
                 this.status('cutover • clock settling');
                 return;
@@ -551,7 +551,7 @@ var llExactAudio = {
         this.endedState = false;
         this.lastSync = d;
         var key = (t && t.media_key) ? t.media_key : d.media;
-        if (d.clock_reset_pending) this.transitionUntil = performance.now() + 3000;
+        if (d.clock_reset_pending) this.transitionUntil = performance.now() + 6000;
         if (!this.anchored) {
             this.mediaKey = key;
             this.mediaName = d.media;
@@ -564,7 +564,7 @@ var llExactAudio = {
             // the same "new" track and tears the queue down forever.
             this.mediaKey = key;
             this.mediaName = d.media;
-            this.transitionUntil = performance.now() + 3000;
+            this.transitionUntil = performance.now() + 6000;
             this.driftCount = 0;
             if (typeof llPlayer !== 'undefined') llPlayer.markTrackChange();
             // Bridge the switch with the native stream, then stop scheduling
@@ -706,6 +706,7 @@ var llExactAudio = {
     },
 
     ended: function(reason) {
+        if (this.pendingCutover) return;
         this.anchored = false;
         this.mediaKey = null;
         this.mediaName = null;
@@ -793,6 +794,8 @@ var llExactAudio = {
         var want = this.blockSeconds;
         if (duration > 0 && seek + want > duration) want = Math.max(0.02, duration - seek + 0.03);
         var gen = this.generation;
+        var primeEpoch = llMasterClock.epoch || '';
+        var primeMedia = d.media;
         this.fetching = gen;
         this.fetchStartedAt = performance.now();
         var url = 'api/plugin/fpp-ListenLive/media?file=' + encodeURIComponent(d.media) +
@@ -812,6 +815,17 @@ var llExactAudio = {
             }
             var sr = res.info.sr, ch = res.info.ch;
             if (ch < 1 || ch > 2 || sr < 8000) throw new Error('bad PCM headers');
+            if ((primeEpoch && llMasterClock.epoch && llMasterClock.epoch !== primeEpoch) ||
+                (self.lastSync && self.lastSync.media !== primeMedia)) {
+                // Media changed while the block was decoding: discard it and
+                // re-prime from the current master instead of scheduling stale
+                // content from the previous track.
+                self.fetching = 0;
+                self.needPrime = true;
+                self.status('cutover • re-prime');
+                setTimeout(function() { self.fill(); }, 10);
+                return;
+            }
             // Anchor at read time, not at fetch-start time.
             var m2 = llMasterClock.masterNow();
             if (m2 < 0) m2 = m;
@@ -989,6 +1003,12 @@ var llPlayer = {
     // audible the native stream is suspended too: it is a second ffmpeg/PHP
     // stream whose only job is the fallback, and keeping it running starves
     // the PCM chunk fetches.
+    nativeIsBridge: function() {
+        // The muted native stream is only a fallback/transition bridge. Its
+        // events must never tear down the exact engine.
+        return !!(llPlayer.isPlaying && llExactAudio.active &&
+                  !llExactAudio.fallbackActive && !llPlayer.ignoringStreamErrors);
+    },
     syncNativeMute: function() {
         if (!llPlayer.audio) return;
         var webAudioAudible = !!(llExactAudio.active && llExactAudio.audible && !llExactAudio.fallbackActive);
@@ -1035,13 +1055,13 @@ var llPlayer = {
     markTrackChange: function() {
         llPlayer.trackChangePending = true;
         clearTimeout(llPlayer.trackChangeTimeout);
-        llPlayer.trackChangeTimeout = setTimeout(function(){ llPlayer.trackChangePending = false; }, 4000);
+        llPlayer.trackChangeTimeout = setTimeout(function(){ llPlayer.trackChangePending = false; }, 6000);
     },
     endTrackChange: function() {
         // Keep the idle guard up for a few seconds after the cutover commits:
         // FPP can still report idle/no-media while finishing the transition.
         clearTimeout(llPlayer.trackChangeTimeout);
-        llPlayer.trackChangeTimeout = setTimeout(function(){ llPlayer.trackChangePending = false; }, 4000);
+        llPlayer.trackChangeTimeout = setTimeout(function(){ llPlayer.trackChangePending = false; }, 6000);
     },
     // FPP reports the show ended. Stop everything cleanly so the native stream
     // cannot fire reconnect/error events while there is nothing to play. A new
@@ -1167,6 +1187,9 @@ var llPlayer = {
             }
         });
         llPlayer.audio.addEventListener('ended', function() {
+            // The native bridge ends at every file boundary by design. Never
+            // reconnect it while exact audio is running.
+            if (llPlayer.nativeIsBridge()) return;
             // With server-side seamless file-sync, ended should rarely fire (server concatenates)
             // If it does (file-sync without seamless or live gap), just update display, don't auto-reconnect immediately
             // Next status poll will show new track; server will already be streaming it if seamless
@@ -1182,7 +1205,7 @@ var llPlayer = {
             }
         });
         llPlayer.audio.addEventListener('suspend', function() {
-            if (llPlayer.nativeSuspended) return;
+            if (llPlayer.nativeIsBridge() || llPlayer.nativeSuspended) return;
             if (llPlayer.isPlaying && !llPlayer.trackChangePending && !llPlayer.initialConnect) {
                 // Browser suspended download (e.g. tab throttled) — try to resume
                 setTimeout(function(){
@@ -1198,9 +1221,7 @@ var llPlayer = {
             // Do not diagnose or reconnect while FPP is idle or while we are
             // deliberately tearing the stream down.
             if (llPlayer.ignoringStreamErrors || llPlayer.fppIdle || !llPlayer.isPlaying) return;
-            // While exact audio is running, the native stream is only a muted
-            // bridge; its failures must not surface as player errors.
-            if (llExactAudio.active && llExactAudio.audible && !llExactAudio.fallbackActive) return;
+            if (llPlayer.nativeIsBridge()) return;
             var err = llPlayer.audio.error;
             var code = err ? err.code : 0;
             var msg = 'Stream error (code ' + code + ')';
@@ -1249,7 +1270,7 @@ var llPlayer = {
             }
         });
         llPlayer.audio.addEventListener('stalled', function() {
-            if (llPlayer.trackChangePending || llPlayer.initialConnect) return;
+            if (llPlayer.nativeIsBridge() || llPlayer.trackChangePending || llPlayer.initialConnect) return;
             clearTimeout(llPlayer.stalledTimer);
             var isLongPlayStalled = llPlayer.audio.currentTime > 50;
             llPlayer.stalledTimer = setTimeout(function(){
@@ -1268,7 +1289,7 @@ var llPlayer = {
             }, isLongPlayStalled ? 800 : 1500);
         });
         llPlayer.audio.addEventListener('waiting', function() {
-            if (llPlayer.trackChangePending || llPlayer.initialConnect) return;
+            if (llPlayer.nativeIsBridge() || llPlayer.trackChangePending || llPlayer.initialConnect) return;
             clearTimeout(llPlayer.waitingTimer);
             llPlayer.waitingTimer = setTimeout(function(){
                 if (llPlayer.audio.readyState < 3 && llPlayer.isPlaying && !llPlayer.audio.paused && !llPlayer.trackChangePending && !llPlayer.initialConnect) {
@@ -1466,7 +1487,9 @@ var llPlayer = {
         $('#ll_btn_play').attr('onclick', 'llPlayer.play();');
     },
 
-    reconnect: function() {
+    reconnect: function(force) {
+        // Native bridge events are not a reason to restart the exact engine.
+        if (!force && llPlayer.nativeIsBridge()) return;
         llPlayer.reconnecting = true;
         clearTimeout(llPlayer.reconnectTimer);
         llPlayer.reconnectTimer = setTimeout(function(){ llPlayer.reconnecting = false; }, 8000);

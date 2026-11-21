@@ -123,6 +123,10 @@ _hr = _re.search(r'hardResync: function.*?\n    \},', listen, _re.S)
 if not _hr or '.fill()' not in _hr.group(0):
     fail("listen.php hardResync() must call fill() to consume needPrime after a drift resync")
 
+# 7d. Native bridge events must never tear down exact playback.
+if listen.count('nativeIsBridge()') < 6:
+    fail("listen.php native event handlers must guard with nativeIsBridge() so bridge events cannot reconnect")
+
 # 8. Timing helper is dependency-free (no curl/file reads) — structural
 if "curl_init" in timing.lower() or "curl_exec" in timing.lower() or "file_get_contents(" in timing.lower():
     fail("src/Timing.php must be dependency-free (no curl/file reads) so it stays host-testable")

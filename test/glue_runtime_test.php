@@ -276,6 +276,15 @@ namespace {
     rt_check(is_string($cacheDir) && is_dir($cacheDir) && is_writable($cacheDir),
              'cache directory is writable even when plugindata is root-owned');
 
+    rt_case('one-shot fresh status');
+    $tf = $cacheDir . '/ll_transport.json';
+    @file_put_contents($tf, json_encode(['key' => 'x', 'fresh' => true]));
+    rt_check(\LLRuntimeTest\llConsumeFreshTransportStatus() === true,
+             'a media-key change requests one fresh fppd status');
+    $after = @json_decode(@file_get_contents($tf), true);
+    rt_check(is_array($after) && empty($after['fresh']),
+             'fresh-status flag is consumed after one request');
+
     if ($rt_failures === 0) {
         echo "glue_runtime_test: all checks passed\n";
         exit(0);

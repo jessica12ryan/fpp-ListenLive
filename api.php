@@ -1922,7 +1922,9 @@ function llTransportGate($fppStatus, array $sync, $nowMs) {
     $key = (string)($t['media_key'] ?? '');
     $prev = (string)($state['key'] ?? '');
     if ($prev !== '' && $key !== $prev) {
-        $state = ['key' => $key, 'at' => $nowMs, 'pending' => true];
+        // One fresh fppd status on the next request so current_song/duration
+        // are correct before a cutover primes the new media.
+        $state = ['key' => $key, 'at' => $nowMs, 'pending' => true, 'fresh' => true];
     } elseif ($prev === '') {
         $state = ['key' => $key, 'at' => $nowMs, 'pending' => false];
     } else {
@@ -1962,6 +1964,15 @@ function llApplyTransportGate(array $sync, array $t, $pending, $nowWall) {
     return $sync;
 }
 
+function llConsumeFreshTransportStatus() {
+    $cacheFile = llGetCacheDir() . '/ll_transport.json';
+    $state = is_readable($cacheFile) ? @json_decode(@file_get_contents($cacheFile), true) : [];
+    if (!is_array($state) || empty($state['fresh'])) return false;
+    unset($state['fresh']);
+    llAtomicJsonWrite($cacheFile, $state);
+    return true;
+}
+
 function llFinishSync(array $raw, $fppStatus, $nowWall, $source) {
     // Gate first: it needs the native clock before transport mapping rewrites
     // media/seconds for a sequence.
@@ -1994,10 +2005,10 @@ function llSyncEndpoint() {
         }
     }
 
-    // 2) Transport: one cached fppd status. Never force a fresh read here —
-    //    a slow fppd probe would make the clock response late and starve the
-    //    chunk queue. The transition gate below handles the brief lag.
-    $fppStatus = llGetFppStatus(500);
+    // 2) Transport: normally one cached fppd status. On a media-key change a
+    //    single fresh read is forced so the new song is mapped before priming.
+    $freshTransportStatus = llConsumeFreshTransportStatus();
+    $fppStatus = llGetFppStatus($freshTransportStatus ? 0 : 500);
 
     // 3) File written by the C++ plugin (plugindata only — never /tmp).
     $fileSync = null;
