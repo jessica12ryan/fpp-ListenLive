@@ -39,7 +39,7 @@
                     "server_monotonic_ms": { "type": "integer", "description": "PHP wrapper: server monotonic timestamp for round-trip compensation." },
                     "server_wall_ms": { "type": "integer", "description": "PHP wrapper: server wall timestamp for round-trip compensation." },
                     "sync_media": { "type": "string", "description": "For a sequence, the native media/sequence name that produced the clock; the 'media' field is remapped to current_song for audio chunk fetching." },
-                    "clock_reset_pending": { "type": "boolean", "description": "True briefly after a track/sequence change while the native MultiSync clock still reports the old position. master_seconds is seeded from fppd elapsed and confidence is unresolved until the native clock restarts." },
+                    "clock_reset_pending": { "type": "boolean", "description": "True briefly after a track/sequence change until the native MultiSync position and fppd elapsed agree for the new media. master_seconds is seeded from one fresh fppd status read and confidence is unresolved until then." },
                     "clock_epoch": { "type": "string", "description": "Changes with the transport media_key. The browser resets its clock estimator on epoch change instead of slewing across a track boundary." },
                     "clock_source": { "type": "string", "description": "Set to 'fppd-status' when the clock comes from the cached fppd status rather than native MultiSync." },
                     "transport": {

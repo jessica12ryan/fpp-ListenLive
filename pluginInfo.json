@@ -2,7 +2,7 @@
 	"repoName": "fpp-ListenLive",
 	"name": "Listen Live Plugin for FPP",
 	"author": "jessica12ryan",
-	"description": "Listen to your show's audio in the FPP UI. Frame-exact playback uses FPP's MultiSync clock with short, scheduled audio chunks; if exact sync is unavailable it falls back to the live stream (PulseAudio, PipeWire or ALSA capture). Includes live status and volume control. Audio stays on your LAN.",
+	"description": "Listen to your show's audio in the FPP UI. Frame-exact playback uses FPP's MultiSync clock with raw PCM blocks scheduled by Web Audio; playback auto-starts with FPP and the best-effort MP3 fallback streams the current media file before live capture. Includes live status and volume control. Audio stays on your LAN.",
 	"minMemoryMB": 512,
 	"minCpuCores": 1,
 	"homeURL": "https://github.com/jessica12ryan/fpp-ListenLive",
@@ -28,7 +28,7 @@
 			}
 		],
 		"closedCode": false,
-		"other": "Settings are stored by FPP in <mediadir>/config/plugin.fpp-ListenLive (not in the plugin directory); a legacy config/settings.json is migrated to <mediadir>/plugindata/fpp-ListenLive on install. Audio is served only to browsers on your LAN, and logs go to <mediadir>/logs/plugin-fpp-ListenLive.log. Your browser keeps its volume choice in localStorage."
+		"other": "Settings are stored by FPP in <mediadir>/config/plugin.fpp-ListenLive (not in the plugin directory); a legacy config/settings.json is migrated to <mediadir>/plugindata/fpp-ListenLive on install. Audio is served only to browsers on your LAN, and logs go to <mediadir>/logs/plugin-fpp-ListenLive.log. Your browser keeps its volume and Exact-sync toggle preferences in localStorage; mute is never saved."
 	},
 	"versions": [
 		{

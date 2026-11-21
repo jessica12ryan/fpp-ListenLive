@@ -4,11 +4,12 @@
 <h4>Features</h4>
 <ul>
     <li>Web Audio <b>Exact frame sync</b>, on by default on first visit: FPP's native MultiSync clock is anchored with a monotonic RTT measurement and short raw-PCM chunks are scheduled sample-accurately.</li>
-    <li>Small ~0.5 s chunk queue; live drift, RTT, and clock source are shown in <code>#ll_exact_status</code> on the Listen page.</li>
+    <li>~0.5 s audible latency with a deeper prefetch that never delays playback; live drift, RTT, and clock source are shown in <code>#ll_exact_status</code> on the Listen page.</li>
     <li>PHP status-poll fallback when the native sync library or MultiSync is unavailable.</li>
     <li>Automatic fallback after repeated chunk failures to the raw <code>/stream</code> (<code>audio/mpeg</code>), clearly labeled <b>best-effort / NOT frame-exact</b>.</li>
     <li>Live capture via PipeWire/PulseAudio monitor or ALSA using FFmpeg → MP3 (<code>libmp3lame</code>); File Sync capture source also available.</li>
-    <li>Status: playlist, sequence, song, and elapsed time from <code>/api/fppd/status</code>, polled every 500 ms on the Listen page.</li>
+    <li>Auto-play with FPP, one-cutover track changes, and clean idle stop when a playlist ends with no background music.</li>
+    <li>Status: playlist, sequence, song, and elapsed time from <code>/api/fppd/status</code>, polled every 1 s on the Listen page (exact clock at 4 Hz).</li>
     <li>Volume is remembered per browser in <code>localStorage</code>; mute is never persisted — each page load starts unmuted.</li>
     <li>Works with FPP 8.x, 9.x, 10.x, and 11.x.</li>
 </ul>
@@ -16,13 +17,13 @@
 <h4>How It Works</h4>
 <ol>
     <li>The Listen page reads <code>api/plugin/fpp-ListenLive/sync</code>, a wrapper around the native MultiSync clock (or the PHP status-poll fallback).</li>
-    <li>It fetches raw PCM chunks from <code>api/plugin/fpp-ListenLive/media?file=...&amp;seek=...&amp;duration=0.5&amp;format=pcm</code>, builds AudioBuffers directly, and schedules them against the master clock.</li>
-    <li>If chunk fetch/decode fails repeatedly, playback switches to <code>api/plugin/fpp-ListenLive/stream</code> — a live capture of FPP's audio output. Browser buffering makes that path best-effort, not frame-exact.</li>
+    <li>It fetches multi-second raw PCM blocks from <code>api/plugin/fpp-ListenLive/media?file=...&amp;seek=...&amp;duration=4&amp;format=pcm</code>, slices them into 0.5 s AudioBuffers, and schedules them against the master clock.</li>
+    <li>If block fetch/decode fails repeatedly, playback switches to <code>api/plugin/fpp-ListenLive/stream</code> — file-sync of the current media first, then live capture. Browser buffering makes that path best-effort, not frame-exact.</li>
     <li>Enable MultiSync in FPP Settings → MultiSync for exact timing across players and remotes.</li>
 </ol>
 
 <h4>Privacy</h4>
-<p>Audio is captured on the FPP host and streamed to your browser on the LAN. Nothing is sent off-box, audio is not stored, and there is no telemetry, advertising, or donations.</p>
+<p>Audio is captured or read on the FPP host and streamed to your browser on the LAN. Nothing is sent off-box, audio is not stored, and there is no telemetry, advertising, or donations. Your browser stores volume and Exact-sync preferences; mute is never saved.</p>
 
 <h4>Links</h4>
 <ul>

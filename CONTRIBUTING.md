@@ -20,11 +20,26 @@ find . -name '*.php' -o -name '*.inc' | xargs -n1 php -l
 # Timing helper unit tests
 php test/timing_test.php
 
-# Glue/lint checks (requires test/timing_test.php and consistent JS/PHP wiring)
+# API glue/security runtime tests and the Web Audio block-slicer test
+php test/glue_runtime_test.php
+node test/exact_audio_test.js
+
+# Glue/lint checks (also catches stale documentation strings)
 python3 scripts/lint_glue.py
+
+# Syntax-check the embedded Listen page JavaScript and the API schema
+python3 - <<'PY'
+from pathlib import Path
+s = Path('listen.php').read_text(encoding='utf-8')
+a = s.index('<script>') + len('<script>')
+b = s.index('</script>', a)
+Path('/tmp/listen_check.js').write_text(s[a:b], encoding='utf-8')
+PY
+node --check /tmp/listen_check.js
+python3 -m json.tool apiDocs.json > /dev/null
 ```
 
-All three must pass before opening a pull request.
+All checks must pass before opening a pull request.
 
 ## Web integration tests (fpp-tests)
 

@@ -163,6 +163,23 @@ for ep in registered:
     if ep.strip().lower() in destructive:
         fail("api.php exposes destructive endpoint '%s' — only read-only check-updates is allowed" % ep)
 
+# 12. Documentation must not drift back to the pre-block/pre-autoplay wording.
+DOC_FILES = [
+    "README.md", "CONTRIBUTING.md", "SECURITY.md", "pluginInfo.json",
+    "apiDocs.json", "help.php", "about.php", "config.php",
+] + [str(p.relative_to(ROOT)) for p in sorted((ROOT / "help").glob("*.php"))]
+STALE_DOC_TEXT = [
+    "duration=0.5", "duration=1.5", "every 500 ms", "500 ms on the Listen page",
+    "~0.6–1.5 s", "0.6-1.5 s", "only its volume preference",
+    "volume choice in localStorage", "wall-clock reference",
+    "Click <b>▶ Play</b>", "click **▶ Play**",
+]
+for doc in DOC_FILES:
+    text = read(ROOT / doc)
+    for stale in STALE_DOC_TEXT:
+        if stale in text:
+            fail("documentation '%s' still contains stale text: %s" % (doc, stale))
+
 if failures:
     print("glue lint FAILED:")
     for f in failures:

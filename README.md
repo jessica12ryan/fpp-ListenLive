@@ -8,7 +8,7 @@ Listen Live lets you monitor the audio FPP is sending to your audience from **Co
 
 - **Exact frame sync (primary path):** Web Audio is on by default on the first visit. The player reads FPP's native MultiSync clock, estimates its offset with a monotonic round-trip measurement (never by comparing browser and server wall clocks), and anchors a Web Audio timeline so each chunk's content time equals the FPP master position at the moment it is scheduled to sound. It fetches **multi-second raw PCM blocks** from `api/plugin/fpp-ListenLive/media?file=...&seek=...&duration=4&format=pcm` and slices them into 0.5 s `AudioBuffer`s in the browser — one ffmpeg process per block instead of per chunk. No MP3 encoder/decoder priming. About **0.5 s** of audible latency is queued (more when the tab is hidden); chunks may be *scheduled* further ahead to ride out slow fetches, but that prefetch depth never delays what you hear. Drift is measured against the master clock and corrected with small nudges or a hard resync; the live value is shown in `#ll_exact_status`.
 - **MultiSync:** the native plugin hooks both **media** and **sequence** sync packets, so a playlist of `.fseq` sequences is timed from the same master clock as an MP3. Enable **MultiSync** in FPP Settings for exact timing across players and remotes. "Exact" is only claimed when the API reports `source: c++` and `confidence: exact`; otherwise the status is explicitly labeled **NOT frame-exact** even though audio keeps playing.
-- **Automatic raw-stream fallback:** if Web Audio cannot fetch or decode media chunks (for example, no media file or a decode failure), after a few failures the player switches to the raw live stream `api/plugin/fpp-ListenLive/stream` (`audio/mpeg`) and clearly labels it **best-effort / NOT frame-exact**. That stream is a live capture of FPP's audio output: it carries whatever is playing now, but browser buffering adds unmeasured latency, so it cannot be frame-locked to MultiSync.
+- **Automatic raw-stream fallback:** if Web Audio cannot fetch or decode media blocks (for example, no media file or a decode failure), after repeated failures the player switches to `api/plugin/fpp-ListenLive/stream` (`audio/mpeg`) and clearly labels it **best-effort / NOT frame-exact**. That endpoint first streams the current media file from FPP's media tree (seeked to the current position) and falls back to live capture (PipeWire/PulseAudio/ALSA). Browser buffering adds unmeasured latency, so it cannot be frame-locked to MultiSync.
 - **FPP drives the transport:** `/sync` also carries a compact `transport` block from a cached fppd status read. Opening the page while a show is on air attempts to start automatically: Web Audio is tried first, then the native stream. If the browser blocks audible autoplay, a **Tap to start audio** button appears (any first click on the page also works). An explicit Pause is in-memory only for the current page. Track/sequence changes uncover the native stream to bridge the switch, wait for the native and fppd clocks to agree, then cut over exactly once from the stable master. An ended playlist goes idle (with no background music) and the player clears its stream cleanly instead of reporting errors; a new playlist auto-starts again.
 - Live status shows the current playlist, sequence/song, and elapsed time; the Listen page polls status every **1 s** (the exact clock polls `/sync` at 4 Hz independently).
 - Volume is saved per browser in `localStorage`. **Mute is never persisted** — every page load starts unmuted.
@@ -47,10 +47,10 @@ Do **not** use `sudo`: FPP runs its plugin installer as root already. If you ins
 
 1. In FPP Settings → MultiSync, **enable MultiSync** if you want exact sync across players/remotes.
 2. Start a playlist or schedule so audio is playing.
-3. Open **Content Setup → Listen Live** and click **▶ Play**. Exact frame sync is already on by default on the first visit.
+3. Open **Content Setup → Listen Live**. If FPP is already playing, playback starts automatically (click **Tap to start audio** if the browser blocks autoplay). Exact frame sync is on by default on the first visit.
 4. The **Exact frame sync** checkbox on the Listen page turns Web Audio scheduling on or off. While it is active, `#ll_exact_status` shows the sync state and drift. If chunk playback fails a few times, the status text shows the best-effort / NOT frame-exact fallback label.
 5. Adjust **Volume** with the slider — it is stored in `localStorage` per browser. **Mute is not stored**; every page load starts unmuted.
-6. The header shows **● LIVE** while audio is streaming, and the **Now Playing** line shows the current media. Status is polled every 500 ms.
+6. The header shows **● LIVE** while audio is streaming, and the **Now Playing** line shows the current media. Status is polled every **1 s**; the exact clock polls `/sync` independently at 4 Hz.
 
 The raw stream can also be opened directly in VLC or another player:
 
@@ -84,11 +84,11 @@ Web Audio (exact, default)                      Raw stream (best-effort fallback
    |      master_seconds at response time                  FPP audio output
    |      + RTT/2 (monotonic), no wall clocks              (PipeWire/Pulse/ALSA)
    |                                                       |
-/media?file=...&seek=...&duration=0.5&format=pcm          |
+/media?file=...&seek=...&duration=4&format=pcm           |
    |  Int16Array -> AudioBuffer (no decoding)              v
    v                                            audio/mpeg (live capture)
 AudioBufferSourceNode at master-anchored time
-   |  ~0.5 s queue, drift shown in #ll_exact_status
+   |  0.5 s audible latency, ~4-5 s prefetch; drift in #ll_exact_status
    v
 Speakers / headphones
 ```
@@ -101,7 +101,7 @@ See [apiDocs.json](apiDocs.json) for the native sync/clock route schemas.
 
 ## Privacy
 
-Audio is captured on the FPP host and streamed to your browser **on your LAN**. Nothing is sent off-box, audio is not stored, and there is no telemetry, advertising, or donations. Your browser keeps only its volume preference in `localStorage` (mute is never saved). Settings stay in FPP's plugin configuration and the log stays under `<mediadir>/logs/`.
+Audio is captured on the FPP host and streamed to your browser **on your LAN**. Nothing is sent off-box, audio is not stored, and there is no telemetry, advertising, or donations. Your browser keeps its volume and Exact-sync toggle preferences in `localStorage` (mute is never saved). Settings stay in FPP's plugin configuration and the log stays under `<mediadir>/logs/`.
 
 ## API Endpoints
 
@@ -112,8 +112,8 @@ All endpoints are under `api/plugin/fpp-ListenLive/`:
 | GET | `status` | Plugin settings, FPP status, capture detection, timing |
 | GET | `diagnostics` | ffmpeg / audio device checks and candidate capture commands |
 | GET | `nowplaying` | Raw `/api/fppd/status` proxy |
-| GET | `stream` | MP3 live capture of FPP's audio output (best-effort, not frame-exact) |
-| GET | `media?file=...&seek=...&duration=...` | Timestamped media chunk for Web Audio exact scheduling (also supports Range) |
+| GET | `stream` | MP3 fallback stream: file-sync of current media first, then live capture (best-effort, not frame-exact) |
+| GET | `media?file=...&seek=...&duration=...&format=pcm` | Raw PCM block for Web Audio exact scheduling (also supports MP3/Range) |
 | GET | `sync` | PHP wrapper for the native MultiSync clock / status-poll fallback |
 | GET | `clock` | PHP wrapper for the native monotonic/wall clock |
 | POST | `save` | Save configuration |
@@ -125,14 +125,14 @@ Use FPP's Plugin Manager for plugin management and FPP's own UI for FPPD control
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for host-side checks (`php -l`, `test/timing_test.php`, `scripts/lint_glue.py`), the fpp-tests web suite (Docker required), and the native build.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full host-side check list (`php -l`, `test/timing_test.php`, `test/glue_runtime_test.php`, `test/exact_audio_test.js`, `scripts/lint_glue.py`, and JSON validation), the fpp-tests web suite (Docker required), and the native build.
 
 ## Troubleshooting
 
 - **Not frame-exact / players or remotes drift:** enable MultiSync in FPP Settings → MultiSync and check `#ll_exact_status` on the Listen page; `source: fallback` means the PHP status poll is in use.
 - **"best-effort / NOT frame-exact" label:** Web Audio could not fetch/decode media chunks; the raw `/stream` fallback is active. Check that media is actually playing and that the media file can be decoded.
 - **No audio / stream error:** confirm a playlist is playing, verify ffmpeg capture with **Config → Test Capture**, and check **Status → Diagnostics** for capture devices.
-- **Choppy audio / high CPU:** lower the bitrate to 96k or 64k, or select a source with less overhead.
+- **Choppy audio:** confirm `#ll_exact_status` says `exact` and MultiSync is enabled; the exact PCM path does not use the bitrate setting. Bitrate/channel changes only affect the best-effort fallback stream. Check FPP CPU load if the fallback path is active.
 - **Logs:** `tail -50 <mediadir>/logs/plugin-fpp-ListenLive.log` (default: `/home/fpp/media/logs/plugin-fpp-ListenLive.log`).
 
 ## License

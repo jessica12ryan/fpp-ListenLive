@@ -49,7 +49,7 @@ $showDevTab = $uiLevel >= 3;
                     <td style="padding: 4px;"><b>Audio Source:</b></td>
                     <td style="padding: 4px;">
                         <select id="ll_source">
-                            <option value="auto" <?php echo ($llSettings['source']==='auto'?'selected':''); ?>>Auto (try Pulse → ALSA)</option>
+                            <option value="auto" <?php echo ($llSettings['source']==='auto'?'selected':''); ?>>Auto (try PipeWire/Pulse → ALSA)</option>
                             <option value="pulse" <?php echo ($llSettings['source']==='pulse'?'selected':''); ?>>PulseAudio only</option>
                             <option value="alsa" <?php echo ($llSettings['source']==='alsa'?'selected':''); ?>>ALSA only</option>
                             <option value="file" <?php echo ($llSettings['source']==='file'?'selected':''); ?>>File Sync (stream media file)</option>
@@ -81,7 +81,7 @@ $showDevTab = $uiLevel >= 3;
                             <option value="<?php echo $br; ?>" <?php echo ($llSettings['bitrate']===$br?'selected':''); ?>><?php echo $br; ?></option>
                             <?php endforeach; ?>
                         </select>
-                        <span id="ll_bitrate_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="MP3 encoding bitrate. Higher = better quality but more CPU and bandwidth. 128k is recommended for show audio (5–10% CPU on Pi 4). Use 64k/96k if audio is choppy or CPU is high."><img id="ll_bitrate_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span>
+                        <span id="ll_bitrate_tip" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="auto" data-bs-title="MP3 encoding bitrate for the fallback stream only. Higher = better quality but more CPU and bandwidth. 128k is recommended; 64k/96k reduce CPU. The exact Web Audio path uses raw PCM and ignores this setting."><img id="ll_bitrate_img" src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span>
                     </td>
                 </tr>
                 <tr>
@@ -127,15 +127,15 @@ $showDevTab = $uiLevel >= 3;
     <fieldset class="border p-3">
         <legend>How Audio Capture Works</legend>
         <div class="p-3">
-            <p>This plugin streams the FPP's <b>live audio output</b> to your browser. It works best when FPP's audio is routed through an OS mixer that ffmpeg can capture:</p>
+            <p>These settings control the fallback MP3 stream. The primary Web Audio path fetches raw PCM blocks from FPP's media tree and is frame-locked to MultiSync; the fallback stream obtains audio this way:</p>
             <ul>
                 <li><b>PulseAudio (recommended):</b> captures the <code>.monitor</code> source of the output device — exact copy of what the audience hears, including sequences + media + effects. Enable PulseAudio in FPP Settings → Audio if available.</li>
                 <li><b>ALSA:</b> captures the hardware device (e.g. <code>default</code> or <code>hw:0,0</code>). You may need an ALSA loopback device (<code>snd-aloop</code>) if your audio hardware doesn't support concurrent capture.</li>
-                <li><b>File Sync fallback:</b> if no capture device is available (or FFmpeg is missing), the plugin streams the <b>current media file</b> directly, seeking to the elapsed position so it's roughly in sync with the lights.</li>
+                <li><b>File Sync (default fallback):</b> the plugin first streams the <b>current media file</b>, seeking to the elapsed position. Live capture is used only when no file is available.</li>
             </ul>
             <p class="text-secondary" style="font-size:13px;">
                 The stream is served as <code>audio/mpeg</code> at <code>api/plugin/fpp-ListenLive/stream</code> and played with a standard HTML5 &lt;audio&gt; element — no extra ports or Icecast server required.
-                For best results, keep the browser tab on the same LAN as FPP to minimize latency (~1–3 seconds).
+                For best results, keep the browser tab on the same LAN as FPP. The exact path adds ~0.5 s of audible latency; the fallback stream has unmeasured browser/network buffering.
             </p>
         </div>
     </fieldset>
