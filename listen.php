@@ -487,7 +487,14 @@ var llExactAudio = {
         llMasterClock.fetch()
             .done(function(d) {
                 self.polling = false;
-                if (self.active && !self.fallbackActive) self.onSync(d);
+                if (self.active && !self.fallbackActive) {
+                    self.onSync(d);
+                    // Watchdog: a lost timer chain must never leave needPrime
+                    // unconsumed with an empty queue.
+                    if (self.needPrime && !self.fetching && self.anchored && !self.pendingCutover) {
+                        self.fill();
+                    }
+                }
             })
             .fail(function() { self.polling = false; });
     },
@@ -664,6 +671,11 @@ var llExactAudio = {
         this.driftHist = [];
         this.needPrime = true;
         this.status('resync ' + reason);
+        // A drift-triggered resync happens inside fill()'s correct() guard,
+        // which returns immediately. Schedule the refill explicitly or the
+        // engine sits with an empty queue until a manual Stop/Play.
+        var self = this;
+        setTimeout(function() { self.fill(); }, 0);
     },
 
     clearQueue: function(fade) {

@@ -117,6 +117,12 @@ for _ln in listen.splitlines():
     if _in_then and '})' in _ln:
         _in_then = False
 
+# 7c. A hard resync happens inside fill()'s correct() guard, so it must
+# schedule a refill itself or the engine deadlocks with an empty queue.
+_hr = _re.search(r'hardResync: function.*?\n    \},', listen, _re.S)
+if not _hr or '.fill()' not in _hr.group(0):
+    fail("listen.php hardResync() must call fill() to consume needPrime after a drift resync")
+
 # 8. Timing helper is dependency-free (no curl/file reads) — structural
 if "curl_init" in timing.lower() or "curl_exec" in timing.lower() or "file_get_contents(" in timing.lower():
     fail("src/Timing.php must be dependency-free (no curl/file reads) so it stays host-testable")
