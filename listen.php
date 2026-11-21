@@ -1002,10 +1002,22 @@ var llPlayer = {
         if (!llPlayer.audio || !llPlayer.nativeSuspended) return;
         llPlayer.nativeSuspended = false;
         if (!llPlayer.isPlaying) return;
+        // A paused <audio> element keeps its old buffered bytes. Resuming it
+        // would replay the first track from page start. Always open a fresh
+        // stream for whatever FPP is playing now.
+        llPlayer.reconnecting = true;
+        llPlayer.suppressNativePause = true;
         try {
+            llPlayer.audio.src = llPlayer.buildUrl();
+            llPlayer.audio.load();
+            llPlayer.reconnectAttempts = 0;
             var p = llPlayer.audio.play();
             if (p && p.catch) p.catch(function(){});
         } catch(e) {}
+        setTimeout(function(){
+            llPlayer.reconnecting = false;
+            llPlayer.suppressNativePause = false;
+        }, 0);
     },
     setUserPaused: function(paused) {
         // In-memory only: an explicit Pause suppresses polling-driven restarts
