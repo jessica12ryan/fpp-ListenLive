@@ -43,6 +43,7 @@ checkEq(LLSyncTiming::formatTime(5), '00:05', '5', __LINE__);
 checkEq(LLSyncTiming::formatTime(60), '01:00', '60', __LINE__);
 checkEq(LLSyncTiming::formatTime(61), '01:01', '61', __LINE__);
 checkEq(LLSyncTiming::formatTime(600), '10:00', '600', __LINE__);
+checkEq(LLSyncTiming::formatTime(3723), '62:03', '3723 = 62m03s', __LINE__);
 checkEq(LLSyncTiming::formatTime(-3), '00:00', 'neg clamp', __LINE__);
 
 CASE_('seekPosition latency 1.3');
@@ -53,10 +54,14 @@ checkFloat(LLSyncTiming::seekPosition(10), 8.7, '10-1.3', __LINE__);
 checkFloat(LLSyncTiming::seekPosition(10, 0.5), 9.5, 'seamless 0.5', __LINE__);
 checkFloat(LLSyncTiming::seekPosition(100, 1.3), 98.7, 'large', __LINE__);
 
-CASE_('byteOffset');
-checkEq(LLSyncTiming::byteOffset(10), (int)(8.7*16000), '10s', __LINE__);
+CASE_('byteOffset — literal bytes, not a self-referential formula');
+// seekPosition(10) = 8.7s; 8.7 * 16000 B/s = 139200 (128k mp3).
+checkEq(LLSyncTiming::byteOffset(10), 139200, '10s = 8.7s * 16000', __LINE__);
 checkEq(LLSyncTiming::byteOffset(0.5), 0, 'clamped', __LINE__);
-checkEq(LLSyncTiming::byteOffset(10, 0.5), (int)(9.5*16000), 'seamless', __LINE__);
+// seekPosition(10, 0.5) = 9.5s; 9.5 * 16000 = 152000.
+checkEq(LLSyncTiming::byteOffset(10, 0.5), 152000, 'seamless = 9.5s * 16000', __LINE__);
+// A custom bytes-per-second must scale the same literal offset.
+checkEq(LLSyncTiming::byteOffset(10, 1.3, 8000), 69600, '8k bps half rate', __LINE__);
 
 CASE_('remaining');
 checkFloat(LLSyncTiming::remaining(0, 5), 0.0, 'unknown duration', __LINE__);
@@ -65,11 +70,18 @@ checkFloat(LLSyncTiming::remaining(100, 100), 0.0, 'at end', __LINE__);
 checkFloat(LLSyncTiming::remaining(100, 120), 0.0, 'over', __LINE__);
 
 CASE_('shouldSend half-second dedup — mirrors FPPPulseMesh.cpp:131');
+// Negatives: values inside the same half-second window must NOT be sent.
 check(!LLSyncTiming::shouldSend(1.0, 1.2), 'same half 1.0 vs 1.2', __LINE__);
 check(!LLSyncTiming::shouldSend(1.0, 1.49), 'same half 1.49', __LINE__);
+check(!LLSyncTiming::shouldSend(1.0, 1.0), 'identical values', __LINE__);
+check(!LLSyncTiming::shouldSend(2.25, 2.49), 'same 2.x half', __LINE__);
+check(!LLSyncTiming::shouldSend(0.0, 0.49), 'same 0.x half', __LINE__);
+check(!LLSyncTiming::shouldSend(3.5, 3.99), 'same 3.x upper half', __LINE__);
+check(!LLSyncTiming::shouldSend(10.1, 10.0), 'regressive but same half', __LINE__);
+// Positives: crossing a half-second boundary must send.
 check(LLSyncTiming::shouldSend(1.0, 1.5), 'cross 1.0->1.5', __LINE__);
 check(LLSyncTiming::shouldSend(0.0, 0.5), '0->0.5', __LINE__);
-check(!LLSyncTiming::shouldSend(2.25, 2.49), 'same 2.x half', __LINE__);
+check(LLSyncTiming::shouldSend(1.49, 1.5), 'cross at boundary', __LINE__);
 
 CASE_('elapsedFromStatus priority bg > fpp > fallback');
 checkFloat(LLSyncTiming::elapsedFromStatus(['seconds_elapsed'=>10], ['trackElapsed'=>30], ['elapsed'=>5]), 30.0, 'bg wins', __LINE__);
@@ -77,6 +89,12 @@ checkFloat(LLSyncTiming::elapsedFromStatus(['seconds_elapsed'=>10], null, ['elap
 checkFloat(LLSyncTiming::elapsedFromStatus(null, null, ['elapsed'=>7]), 7.0, 'fallback only', __LINE__);
 checkFloat(LLSyncTiming::elapsedFromStatus(null, null, null), 0.0, 'zero', __LINE__);
 checkFloat(LLSyncTiming::elapsedFromStatus(['seconds_elapsed'=>0], ['elapsed'=>12], null), 12.0, 'bg elapsed alt key', __LINE__);
+// A non-numeric bgStatus.trackElapsed must NOT cast to 0 and shadow fppd's
+// seconds_elapsed (src/Timing.php:84 no longer does `return (int)...`).
+checkFloat(LLSyncTiming::elapsedFromStatus(['seconds_elapsed'=>42], ['trackElapsed'=>'--:--'], null), 42.0, 'non-numeric bgElapsed ignored', __LINE__);
+checkFloat(LLSyncTiming::elapsedFromStatus(['seconds_elapsed'=>42], ['trackElapsed'=>'N/A'], ['elapsed'=>7]), 42.0, 'non-numeric bgElapsed falls through', __LINE__);
+checkFloat(LLSyncTiming::elapsedFromStatus(['seconds_elapsed'=>42], ['trackElapsed'=>''], null), 42.0, 'empty bgElapsed ignored', __LINE__);
+checkFloat(LLSyncTiming::elapsedFromStatus(null, ['trackElapsed'=>'--:--'], ['elapsed'=>7]), 7.0, 'non-numeric bgElapsed, fallback used', __LINE__);
 
 CASE_('durationFromStatus');
 checkFloat(LLSyncTiming::durationFromStatus(null, ['trackDuration'=>180], null), 180.0, 'bg duration', __LINE__);
@@ -104,6 +122,15 @@ checkEq($b['durationArg'], '', 'no -t when unknown', __LINE__);
 $c = LLSyncTiming::ffmpegSeekArgs(10, 100, true);
 checkFloat($c['seekPos'], 9.5, 'seamless seek', __LINE__);
 checkEq($c['durationArg'], ' -t 91.0', 'seamless -t covers remaining + 0.5 latency + pad', __LINE__);
+// elapsed > duration (status overshoot): seek still positive, remaining 0, no -t.
+$d = LLSyncTiming::ffmpegSeekArgs(120, 100);
+checkFloat($d['seekPos'], 118.7, 'seek past duration', __LINE__);
+checkFloat($d['remaining'], 0.0, 'no remaining past end', __LINE__);
+checkEq($d['durationArg'], '', 'no -t past end', __LINE__);
+$e = LLSyncTiming::ffmpegSeekArgs(100, 100, true);
+checkFloat($e['seekPos'], 99.5, 'seamless seek at duration', __LINE__);
+checkFloat($e['remaining'], 0.0, 'no remaining at end', __LINE__);
+checkEq($e['durationArg'], '', 'no -t at end', __LINE__);
 
 if ($failures === 0) {
     echo "timing_test: all checks passed\n";

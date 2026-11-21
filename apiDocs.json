@@ -2,25 +2,37 @@
   "paths": {
     "/ListenLive/sync": {
       "get": {
-        "summary": "Frame-exact sync clock (monotonic) from C++ MultiSync",
-        "description": "Returns current media, seconds, extrapolated_seconds, monotonic_ms, wall_ms, epoch_ms, confidence and playlist state from the C++ MultiSync plugin. Falls back to PHP file/status when fppd API is unreachable. Used by the Listen page's Exact frame sync (AudioContext) to schedule gapless playback.",
+        "summary": "Frame-exact sync state from FPP's MultiSync clock",
+        "description": "Returns the current media position from the native MultiSync clock, extrapolated with a monotonic (steady_clock) delta against a wall-clock reference so callers can schedule sample-accurate playback between sync packets. On players/remotes this requires MultiSync to be enabled (FPP Settings -> MultiSync); otherwise confidence is 'unresolved' and the PHP wrapper falls back to status polling. The native plugin also mirrors state to <mediadir>/plugindata/fpp-ListenLive/ll_sync.json. The legacy HTTP variant uses ?clock=1 to return the clock payload instead.",
         "responses": {
           "200": {
-            "description": "Sync state",
+            "description": "Sync state (always answerable; precision degrades to unresolved/stale rather than failing)",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "has_media": { "type": "boolean" },
-                    "media": { "type": "string" },
-                    "seconds": { "type": "number" },
-                    "extrapolated_seconds": { "type": "number" },
-                    "monotonic_ms": { "type": "integer" },
-                    "wall_ms": { "type": "integer" },
-                    "epoch_ms": { "type": "integer" },
-                    "confidence": { "type": "string" },
-                    "source": { "type": "string" }
+                    "has_media": { "type": "boolean", "description": "True when media is known and its position is non-negative." },
+                    "media": { "type": "string", "description": "Filename currently reported by MultiSync." },
+                    "seconds": { "type": "number", "description": "Media position in seconds at the last sync packet." },
+                    "extrapolated_seconds": { "type": "number", "description": "Estimated current media position in seconds; -1 when no media or stale sync." },
+                    "extrapolated": { "type": "boolean", "description": "True when extrapolation was applied (last sync under 2 seconds old)." },
+                    "frame": { "type": "integer", "description": "Approximate frame number at the last sync position (44.1 kHz); -1 when no media." },
+                    "last_media_half": { "type": "integer", "description": "Half-second tick of the last recorded media position, used for dedup." },
+                    "monotonic_ms": { "type": "integer", "description": "Native steady_clock timestamp in milliseconds at the time of the response." },
+                    "wall_ms": { "type": "integer", "description": "Native system_clock (wall) timestamp in milliseconds at the time of the response." },
+                    "epoch_ms": { "type": "integer", "description": "Wall-clock reference in milliseconds used to anchor the clocks." },
+                    "confidence": { "type": "string", "enum": ["exact", "unresolved"], "description": "'exact' when a recent sync packet and media are available, otherwise 'unresolved' (stale)." },
+                    "playlist": { "type": "string", "description": "Current playlist name." },
+                    "playlist_action": { "type": "string", "description": "Most recent playlist action reported by MultiSync." },
+                    "playlist_size": { "type": "integer", "description": "Number of items in the current playlist." },
+                    "playlist_item": { "type": "integer", "description": "Current playlist item index." },
+                    "playlist_mono": { "type": "integer", "description": "Monotonic timestamp of the last playlist update, in milliseconds." },
+                    "duration": { "type": "number", "description": "Total media duration in seconds when known; may be added by the PHP wrapper or an updated native build." },
+                    "has_duration": { "type": "boolean", "description": "True when 'duration' is a trustworthy value for the current media." },
+                    "source": { "type": "string", "description": "PHP wrapper: clock source (native/c++/file/fallback)." },
+                    "server_monotonic_ms": { "type": "integer", "description": "PHP wrapper: server monotonic timestamp for round-trip compensation." },
+                    "server_wall_ms": { "type": "integer", "description": "PHP wrapper: server wall timestamp for round-trip compensation." }
                   }
                 }
               }
@@ -32,18 +44,19 @@
     "/ListenLive/clock": {
       "get": {
         "summary": "Monotonic and wall clock",
-        "description": "Returns monotonic_ms, wall_ms and epoch_ms from steady_clock / system_clock. Used to anchor Exact sync without media.",
+        "description": "Returns the native plugin's steady_clock and system_clock readings, used to anchor Web Audio scheduling without media. The PHP wrapper (/api/plugin/fpp-ListenLive/clock) returns PHP clock values when the native route is unavailable. In the legacy HTTP variant this payload is returned by /ListenLive/sync?clock=1.",
         "responses": {
           "200": {
-            "description": "Clock",
+            "description": "Clock snapshot (always answerable)",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "monotonic_ms": { "type": "integer" },
-                    "wall_ms": { "type": "integer" },
-                    "epoch_ms": { "type": "integer" }
+                    "monotonic_ms": { "type": "integer", "description": "steady_clock time since epoch, in milliseconds." },
+                    "wall_ms": { "type": "integer", "description": "system_clock (wall) time since epoch, in milliseconds." },
+                    "epoch_ms": { "type": "integer", "description": "Wall-clock reference used to anchor the monotonic clock." },
+                    "source": { "type": "string", "description": "PHP wrapper only: 'php' when the native clock was unavailable." }
                   }
                 }
               }

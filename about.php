@@ -13,10 +13,10 @@ $showLogsTab = $uiLevel >= 1;
 $showDevTab = $uiLevel >= 3;
 ?>
 <style>
-.tab-bar { display: flex; flex-wrap: wrap; gap: 0; margin-bottom: 12px; border-bottom: 2px solid var(--bs-border-color, #dee2e6); }
-.tab-bar a { display: block; padding: 8px 18px; text-decoration: none; color: var(--bs-body-color, #495057); background: var(--bs-tertiary-bg, #f8f9fa); border: 1px solid var(--bs-border-color, #dee2e6); border-bottom: none; border-radius: 4px 4px 0 0; margin-bottom: -2px; margin-right: 3px; font-size: 14px; }
-.tab-bar a.active { background: var(--bs-body-bg, #fff); color: var(--bs-body-color, #212529); border-color: var(--bs-border-color, #dee2e6); border-bottom-color: var(--bs-body-bg, #fff); font-weight: 600; }
-.tab-bar a:hover:not(.active) { background: var(--bs-secondary-bg, #e9ecef); }
+.tab-bar { display: flex; flex-wrap: wrap; gap: 0; margin-bottom: 12px; border-bottom: 2px solid var(--bs-border-color); }
+.tab-bar a { display: block; padding: 8px 18px; text-decoration: none; color: var(--bs-body-color); background: var(--bs-tertiary-bg); border: 1px solid var(--bs-border-color); border-bottom: none; border-radius: 4px 4px 0 0; margin-bottom: -2px; margin-right: 3px; font-size: 14px; }
+.tab-bar a.active { background: var(--bs-body-bg); color: var(--bs-body-color); border-color: var(--bs-border-color); border-bottom-color: var(--bs-body-bg); font-weight: 600; }
+.tab-bar a:hover:not(.active) { background: var(--bs-secondary-bg); }
 </style>
 
 <?php include __DIR__ . '/tabs.inc'; ?>
@@ -29,27 +29,31 @@ $showDevTab = $uiLevel >= 3;
                 <h3 style="margin-top:0;">Listen Live Plugin for FPP</h3>
 
                 <p>
-                    Stream your show's <b>live audio</b> directly in the FPP web UI — hear exactly what your audience hears without leaving the browser.
+                    Monitor your show's <b>live audio</b> directly in the FPP web UI, frame-locked to FPP's clock when MultiSync is enabled.
                 </p>
 
                 <h4>Features</h4>
                 <ul>
-                    <li>One-click HTML5 audio player embedded in the FPP UI (Content Setup → Listen Live)</li>
-                    <li>Live capture via <b>PulseAudio monitor</b> or <b>ALSA</b> using FFmpeg → MP3</li>
-                    <li>Automatic <b>File Sync fallback</b> — streams the current media file in sync when capture is unavailable</li>
-                    <li>Live status: current playlist, sequence, song, and elapsed time from <code>/api/fppd/status</code></li>
-                    <li>Volume slider + mute, remembered per browser</li>
-                    <li>Auto-reconnect on drop, ~1–3s latency on LAN</li>
-                    <li>Works with FPP 8.x, 9.x, and 10.x</li>
+                    <li>Web Audio <b>Exact frame sync</b>, on by default on first visit: FPP's MultiSync monotonic clock is extrapolated against a wall-clock reference, and short timestamped chunks are scheduled sample-accurately.</li>
+                    <li>Small ~0.6–1.5 s chunk queue for gapless, low-buffer playback; live drift shown beside the player (<code>#ll_exact_status</code>).</li>
+                    <li>PHP status-poll fallback when the native sync library or MultiSync is unavailable.</li>
+                    <li>Automatic fallback to the raw live stream (<code>/stream</code>, <code>audio/mpeg</code>) after repeated chunk failures, clearly labeled <b>best-effort / NOT frame-exact</b>.</li>
+                    <li>Live capture via PipeWire/PulseAudio monitor or ALSA using FFmpeg → MP3; File Sync capture source also available.</li>
+                    <li>Live status: playlist, sequence, song, and elapsed time from <code>/api/fppd/status</code>, polled every 500 ms on the Listen page.</li>
+                    <li>Volume is stored per browser in <code>localStorage</code>; mute is never persisted — every page load starts unmuted.</li>
+                    <li>Works with FPP 8.x, 9.x, 10.x, and 11.x.</li>
                 </ul>
 
                 <h4>How It Works</h4>
                 <ol>
-                    <li>Browser requests <code>api/plugin/fpp-ListenLive/stream</code></li>
-                    <li>Plugin launches <code>ffmpeg -f pulse/alsa -i &lt;device&gt; -codec:a libmp3lame -b:a 128k -f mp3 -</code> and pipes MP3</li>
-                    <li>HTML5 &lt;audio&gt; element plays the stream; status is polled from <code>/api/fppd/status</code></li>
-                    <li>If capture fails, the current media file (from <code>/home/fpp/media/music</code>) is streamed with seek to <code>seconds_elapsed</code></li>
+                    <li>The Listen page reads <code>api/plugin/fpp-ListenLive/sync</code>, which wraps the native MultiSync clock (or the PHP status-poll fallback).</li>
+                    <li>It fetches short chunks from <code>api/plugin/fpp-ListenLive/media?file=...&amp;seek=...&amp;duration=1.5</code>, decodes them with Web Audio, and schedules them against the master clock.</li>
+                    <li>If chunk fetch/decode fails repeatedly, the player switches to <code>api/plugin/fpp-ListenLive/stream</code>, a live capture of FPP's audio output. Browser buffering makes this path best-effort, not frame-exact.</li>
+                    <li>Enable MultiSync in FPP Settings → MultiSync for exact timing across players and remotes; status and diagnostics are served as JSON via the plugin API.</li>
                 </ol>
+
+                <h4>Privacy</h4>
+                <p>Audio is captured on the FPP host and streamed to your browser on the LAN. Nothing is sent off-box, audio is not stored, and there is no telemetry, advertising, or donations.</p>
 
                 <h4>Links</h4>
                 <p>

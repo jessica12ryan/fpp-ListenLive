@@ -27,7 +27,7 @@ $showDevTab = $uiLevel >= 3;
     input[type="text"], select { width: 100% !important; box-sizing: border-box; }
     input.buttons { width: 100%; margin-bottom: 4px; box-sizing: border-box; }
 }
-.ll-player-wrap { background: var(--bs-tertiary-bg, #f8f9fa); border: 1px solid var(--bs-border-color, #dee2e6); border-radius: 8px; padding: 16px; text-align: center; }
+.ll-player-wrap { background: var(--bs-tertiary-bg); border: 1px solid var(--bs-border-color); border-radius: 8px; padding: 16px; text-align: center; }
 .ll-player-wrap audio { width: 100%; max-width: 560px; margin: 12px auto; display: block; }
 .ll-controls { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; align-items: center; margin: 12px 0; }
 .ll-controls .buttons { min-width: 110px; }
@@ -36,9 +36,9 @@ $showDevTab = $uiLevel >= 3;
 .ll-status-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; text-align: left; max-width: 560px; margin: 12px auto; font-size: 14px; }
 .ll-status-grid b { white-space: nowrap; }
 .ll-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
-.ll-badge-live { background: var(--bs-danger); color: var(--bs-white, #fff); animation: llpulse 1.5s infinite; }
-.ll-badge-idle { background: var(--bs-secondary); color: var(--bs-white, #fff); }
-.ll-badge-warn { background: var(--bs-warning); color: var(--bs-dark, #212529); }
+.ll-badge-live { background: var(--bs-danger); color: var(--bs-white); animation: llpulse 1.5s infinite; }
+.ll-badge-idle { background: var(--bs-secondary); color: var(--bs-white); }
+.ll-badge-warn { background: var(--bs-warning); color: var(--bs-dark); }
 @keyframes llpulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
 .ll-nowplaying { font-size: 16px; font-weight: 600; margin: 8px 0; min-height: 24px; }
 .ll-wave { height: 40px; display: flex; align-items: center; justify-content: center; gap: 3px; margin: 10px 0; }
@@ -71,14 +71,14 @@ $showDevTab = $uiLevel >= 3;
 
                 <audio id="ll_audio" controls preload="none" playsinline></audio>
                 <div id="ll_timing" class="ll-timing" style="max-width:560px;margin:8px auto 4px auto;text-align:center;display:none;">
-                    <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--bs-secondary-color,#6c757d);margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--bs-secondary-color);margin-bottom:4px;">
                         <span id="ll_time_elapsed">00:00</span>
                         <span id="ll_time_duration">--:--</span>
                     </div>
-                    <div style="height:6px;background:var(--bs-secondary-bg,#e9ecef);border-radius:3px;overflow:hidden;">
+                    <div style="height:6px;background:var(--bs-secondary-bg);border-radius:3px;overflow:hidden;">
                         <div id="ll_progress" style="height:100%;width:0%;background:var(--bs-primary);transition:width 0.3s linear;"></div>
                     </div>
-                    <div id="ll_time_remaining" style="font-size:11px;color:var(--bs-secondary-color,#6c757d);margin-top:2px;"></div>
+                    <div id="ll_time_remaining" style="font-size:11px;color:var(--bs-secondary-color);margin-top:2px;"></div>
                 </div>
 
                 <div class="ll-controls">
@@ -94,8 +94,8 @@ $showDevTab = $uiLevel >= 3;
                     <input type="button" class="buttons" style="padding:4px 10px; margin-left:8px;" value="Mute" id="ll_mute_btn" onclick="llPlayer.toggleMute();">
                 </div>
                 <div style="margin:8px auto;max-width:560px;text-align:center;">
-                    <label style="font-size:12px;color:var(--bs-secondary-color,#6c757d);"><input type="checkbox" id="ll_exact_toggle" onchange="llExactAudio.toggleAudio(this.checked);" style="vertical-align:middle;margin-right:4px;"> Exact frame sync (Web Audio, versatile)</label>
-                    <span id="ll_exact_status" style="font-size:11px;color:var(--bs-secondary-color,#6c757d);margin-left:8px;"></span>
+                    <label style="font-size:12px;color:var(--bs-secondary-color);"><input type="checkbox" id="ll_exact_toggle" onchange="llExactAudio.toggleAudio(this.checked);" style="vertical-align:middle;margin-right:4px;"> Exact frame sync (Web Audio, versatile)</label>
+                    <span id="ll_exact_status" style="font-size:11px;color:var(--bs-secondary-color);margin-left:8px;"></span>
                     <div id="ll_exact_info" class="alert alert-info py-1 px-2 small" style="font-size:11px;margin-top:6px;display:none;" role="alert"></div>
                 </div>
                 <div class="ll-status-grid" id="ll_details">
@@ -293,6 +293,13 @@ var llExact = {
 var llExactAudio = {
     ctx: null,
     useAudio: false,
+    active: false,
+    audible: false,
+    fallbackActive: false,
+    failCount: 0,
+    // Short chunks keep the queue small (low latency) without underrunning.
+    chunkSeconds: 1.5,
+    queueTarget: 1.5,
     queue: [],
     nextStart: 0,
     fetching: false,
@@ -333,16 +340,19 @@ var llExactAudio = {
         $('#ll_exact_toggle').prop('checked', this.useAudio);
         if (this.useAudio) {
             $('#ll_exact_status').text('exact • AudioContext');
-            $('#ll_exact_info').text('AudioContext gapless — decoding via Web Audio, scheduled to master clock.').show();
-            // When AudioContext is on, disable playbackRate path to avoid double correction
+            $('#ll_exact_info').text('Web Audio schedules short chunks against the MultiSync clock. If chunks cannot be decoded, playback falls back to the live stream.').show();
+            // Web Audio owns exact timing — stop the native playbackRate poller.
             try { llExact.useExact = false; if (llExact.pollTimer) llExact.stop(); } catch(e) {}
             if (llPlayer.isPlaying) this.start();
         } else {
             $('#ll_exact_status').text('exact • off');
-            $('#ll_exact_info').text('AudioContext off — native.').show();
+            $('#ll_exact_info').text('AudioContext off — using the native live stream.').show();
             setTimeout(function(){ $('#ll_exact_info').fadeOut(2000); }, 3000);
             this.stop();
-            try { if (llPlayer.audio) { llPlayer.audio.muted = llPlayer.isMuted; llPlayer.audio.playbackRate = 1.0; } } catch(e) {}
+            llExact.useExact = true;
+            try { if (llPlayer.audio) llPlayer.audio.playbackRate = 1.0; } catch(e) {}
+            llPlayer.syncNativeMute();
+            if (llPlayer.isPlaying) llExact.start();
         }
     },
     start: function() {
@@ -354,17 +364,22 @@ var llExactAudio = {
         if (this.ctx) try { this.ctx.close(); } catch(e) {}
         this.startedAt = nowMs;
         this.ctx = new (window.AudioContext || window.webkitAudioContext)({latencyHint: 'interactive'});
-        // Single audible output: WebAudio owns the sound, native <audio> stays
-        // muted as a silent keepalive/fallback (play() relies on its events).
-        // Route chunks through a gain node so volume/mute keep working.
+        // Route Web Audio chunks through a gain node so volume/mute keep working.
+        // The native element stays AUDIBLE until the first chunk is scheduled,
+        // and becomes audible again immediately if Web Audio fails.
         this.gain = this.ctx.createGain();
         this.gain.connect(this.ctx.destination);
         this.applyGain();
-        this.nextStart = this.ctx.currentTime + 0.4;
+        this.nextStart = this.ctx.currentTime + 0.15;
         this.queue = [];
         this.fetching = false;
         this.lastMedia = null;
-        try { llPlayer.audio.muted = true; } catch(e) {}
+        this.failCount = 0;
+        this.fallbackActive = false;
+        this.active = true;
+        this.audible = false;
+        llPlayer.syncNativeMute();
+        if (this.ctx.state === 'suspended') { try { this.ctx.resume(); } catch(e) {} }
         this.schedule();
     },
     applyGain: function() {
@@ -380,33 +395,52 @@ var llExactAudio = {
         this.queue = [];
         if (this.ctx) { try { this.ctx.close(); } catch(e) {} this.ctx = null; }
         this.gain = null;
-        try { llPlayer.audio.muted = llPlayer.isMuted; } catch(e) {}
+        this.active = false;
+        this.audible = false;
+        this.fallbackActive = false;
+        this.failCount = 0;
+        llPlayer.syncNativeMute();
         // Reset native playbackRate
         try { if (llPlayer.audio) llPlayer.audio.playbackRate = 1.0; } catch(e) {}
     },
+    // Give up Web Audio for this playback session: the raw live stream is
+    // audible but not frame-exact, which is far better than silence.
+    fallBackToNative: function(reason) {
+        if (this.fallbackActive) return;
+        this.fallbackActive = true;
+        this.audible = false;
+        this.active = false;
+        this.fetching = false;
+        llPlayer.syncNativeMute();
+        if (this.ctx) { try { this.ctx.close(); } catch(e) {} this.ctx = null; }
+        this.gain = null;
+        $('#ll_exact_status').text('exact • fallback: live stream (not frame-exact)');
+        $('#ll_exact_info').text('Web Audio could not supply audio (' + (reason || 'no chunks') + '). The live stream is playing instead — it is not frame-locked to MultiSync.').show();
+        setTimeout(function(){ $('#ll_exact_info').fadeOut(6000); }, 6000);
+        console.warn('ListenLive: Web Audio fallback to native stream:', reason || 'no chunks');
+    },
     schedule: function() {
-        if (!this.useAudio || !llPlayer.isPlaying || !this.ctx) return;
+        if (!this.useAudio || !llPlayer.isPlaying || !this.ctx || this.fallbackActive) return;
         var self = this;
         // Watchdog: if ctx was suspended (background tab), resume
         if (self.ctx.state === 'suspended') { try { self.ctx.resume(); } catch(e) {} }
-        // Keep 2-4s queued, not 3s — ensures gapless even with decode delay
+        // Small queue: enough to stay gapless, short enough to keep latency low.
         var queued = self.nextStart - self.ctx.currentTime;
-        if (queued > 4.0) {
-            return setTimeout(function(){ self.schedule(); }, 300);
+        if (queued > self.queueTarget + 0.3) {
+            return setTimeout(function(){ self.schedule(); }, 150);
         }
-        // If queued <0.2s and no fetch in progress, we are about to underrun — warn
-        if (queued < 0.3 && !self.fetching) {
-            console.warn('AudioContext low buffer', queued.toFixed(2));
+        if (queued < 0.15 && !self.fetching) {
             $('#ll_exact_status').text('exact • low buffer '+queued.toFixed(2)+'s');
         }
-        if (self.fetching) return setTimeout(function(){ self.schedule(); }, 80);
+        if (self.fetching) return setTimeout(function(){ self.schedule(); }, 60);
         self.fetching = true;
         $.getJSON('api/plugin/fpp-ListenLive/sync', function(d){
             if (!d || !d.has_media || !d.media) {
                 self.fetching = false;
-                if (queued < 1.0) {
-                    $('#ll_exact_status').text('exact • idle • waiting for next track');
-                }
+                $('#ll_exact_status').text('exact • idle • waiting for next track');
+                // Never trust an idle sync endpoint to produce sound: after a
+                // few empty polls, switch to the audible raw stream.
+                if (++self.failCount >= 6) { self.fallBackToNative('no media in sync'); return; }
                 return setTimeout(function(){ self.schedule(); }, 300);
             }
             var nowWall = Date.now();
@@ -414,34 +448,38 @@ var llExactAudio = {
             var master = (typeof d.extrapolated_seconds === 'number' ? d.extrapolated_seconds : d.seconds) + (nowWall - serverWall)/1000;
             var isNewSong = self.lastMedia && self.lastMedia.split('|')[0] !== d.media;
             if (isNewSong) {
+                self.failCount = 0;
                 console.log('AudioContext new song', d.media, 'master', master.toFixed(1), 'nextStart', self.nextStart.toFixed(2), 'now', self.ctx.currentTime.toFixed(2));
-                // New file: gapless requires old file to finish, new to start at nextStart, but old file's tail is already queued for nextStart
-                // If we keep nextStart, new file will be 2-3s late (old queue). Instead, start new file at nextStart for gapless, but seek to master (0-2s) not 0
-                // For exact, new file's first chunk should be from master, not 0, so seek stays master/5*5 (already)
-                // Keep nextStart for gapless, don't reset to now+0.15 (that would cut old file's tail)
+                // New file: keep nextStart for gapless (a short queue means only
+                // ~1.5s of the old tail is pending), and seek the new file to the
+                // master position rather than 0 so frames stay exact.
             }
-            var duration = d.duration || (d.seconds + (d.seconds_remaining||0)) || 0;
+            // Only trust a real duration. Deriving it from `seconds` made every
+            // C++ sync payload look "near end" forever, so no chunk was ever
+            // fetched and the muted native element played in silence.
+            var duration = (d.has_duration && typeof d.duration === 'number') ? d.duration : 0;
             if (duration > 0 && master > duration - 0.3) {
-                console.log('AudioContext near end', master.toFixed(1), '/', duration);
                 self.fetching = false;
+                $('#ll_exact_status').text('exact • near end, waiting for next track');
+                if (++self.failCount >= 10) { self.fallBackToNative('no next track'); return; }
                 return setTimeout(function(){ self.schedule(); }, 300);
             }
-            // Exact <250ms: seek to master for frame
-            var seek = Math.max(0, master);
-            var mediaKey = d.media + '|' + Math.floor(seek);
+            self.failCount = 0;
+            // Seek to the master position (100ms resolution) and fetch a short
+            // chunk — this is what makes the audio frame-exact and low-latency.
+            var seek = Math.max(0, Math.floor(master * 10) / 10);
+            var mediaKey = d.media + '|' + Math.floor(seek * 2) / 2;
             var queuedNow = self.nextStart - self.ctx.currentTime;
-            if (self.lastMedia === mediaKey && !isNewSong && queuedNow > 1.0) {
+            if (self.lastMedia === mediaKey && !isNewSong && queuedNow > 0.6) {
                 self.fetching = false;
-                return setTimeout(function(){ self.schedule(); }, 120);
+                return setTimeout(function(){ self.schedule(); }, 80);
             }
             if (isNewSong) {
                 self.lastMedia = null;
-                // New song: force fresh fetch
-                mediaKey = d.media + '|' + Math.floor(seek);
+                mediaKey = d.media + '|' + Math.floor(seek * 2) / 2;
             }
             self.lastMedia = mediaKey;
-            // Fetch 5s chunk for low buffering (was whole file)
-            var url = 'api/plugin/fpp-ListenLive/media?file=' + encodeURIComponent(d.media) + '&seek=' + seek + '&duration=5';
+            var url = 'api/plugin/fpp-ListenLive/media?file=' + encodeURIComponent(d.media) + '&seek=' + seek + '&duration=' + self.chunkSeconds;
             fetch(url).then(function(resp){
                 if (!resp.ok) throw new Error('media fetch '+resp.status);
                 return resp.arrayBuffer();
@@ -477,21 +515,24 @@ var llExactAudio = {
                 src.start(when);
                 self.nextStart = when + decoded.duration;
                 self.fetching = false;
+                self.failCount = 0;
+                // Mute the native element only now that Web Audio is audible.
+                self.audible = true;
+                llPlayer.syncNativeMute();
                 $('#ll_exact_status').text('exact • AudioContext • '+d.media.split('/').pop().substring(0,20)+' • '+(master).toFixed(1)+'s • drift '+(drift||0).toFixed(2)+'s');
                 setTimeout(function(){ self.schedule(); }, 80);
             }).catch(function(e){
                 console.warn('AudioContext decode/fetch failed', d.media, e);
                 self.fetching = false;
-                // Don't stop — try next seek or next track, keep native muted
-                // If decode failed for this seek, try next second
-                if (e.message && e.message.indexOf('media not found') !== -1) {
-                    self.lastMedia = d.media + '|' + (seek+1);
-                }
-                setTimeout(function(){ self.schedule(); }, 400);
+                self.failCount++;
+                if (self.failCount >= 3) { self.fallBackToNative(e && e.message ? e.message : 'decode failed'); return; }
+                setTimeout(function(){ self.schedule(); }, 300);
             });
         }).fail(function(){
             self.fetching = false;
-            setTimeout(function(){ self.schedule(); }, 400);
+            self.failCount++;
+            if (self.failCount >= 3) { self.fallBackToNative('sync endpoint unavailable'); return; }
+            setTimeout(function(){ self.schedule(); }, 300);
         });
     }
 };
@@ -519,9 +560,20 @@ var llPlayer = {
     lastSendErrorCount: 0,
     // Append cache buster to force reconnect without browser cache
     buildUrl: function() { return llPlayer.streamUrl + '?t=' + Date.now(); },
+    // The native element is audible unless the user muted it OR Web Audio is
+    // actually producing sound. Never leave it muted with no Web Audio output:
+    // that is the "playing but silent" failure mode.
+    syncNativeMute: function() {
+        if (!llPlayer.audio) return;
+        var webAudioAudible = !!(llExactAudio.active && llExactAudio.audible && !llExactAudio.fallbackActive);
+        try { llPlayer.audio.muted = llPlayer.isMuted || webAudioAudible; } catch(e) {}
+    },
 
     init: function() {
         llPlayer.audio = document.getElementById('ll_audio');
+        // Mute is never persisted: every page load starts audible.
+        llPlayer.isMuted = false;
+        llPlayer.audio.muted = false;
         // Load saved volume
         var savedVol = localStorage.getItem('fpp-ListenLive-volume');
         if (savedVol !== null) {
@@ -536,8 +588,11 @@ var llPlayer = {
         }
         try { llExact.init(); } catch(e) { console.warn('Exact init error', e); }
         try { llExactAudio.init(); } catch(e) { console.warn('ExactAudio init error', e); }
-        // Sync AudioContext toggle with Exact
-        try { if (llExactAudio.useAudio) { llExact.useExact = true; $('#ll_exact_toggle').prop('checked', true); } } catch(e) {}
+        // Only one sync engine at a time: Web Audio owns exact timing when on,
+        // otherwise the native playbackRate poller takes over.
+        llExact.useExact = !llExactAudio.useAudio;
+        $('#ll_exact_toggle').prop('checked', llExactAudio.useAudio);
+        llPlayer.syncNativeMute();
         llPlayer.audio.addEventListener('playing', function() {
             llPlayer.isPlaying = true;
             llPlayer.reconnectAttempts = 0;
@@ -707,12 +762,12 @@ var llPlayer = {
         var a = llPlayer.audio;
         llPlayer.isPlaying = true;
         $('#ll_status_text').html('<span class="text-success">Connecting...</span>');
-        // AudioContext exact takes over — mute native and let it schedule.
-        // Native stays a muted keepalive; the 'playing' event kicks off
-        // llExactAudio.start(). Must resume native when paused, or no
-        // 'playing' event fires and WebAudio never starts (Pause→Play).
+        // Web Audio takes over when it actually schedules a chunk; until then
+        // the native stream stays audible. The 'playing' event kicks off
+        // llExactAudio.start(). Resume native when paused, or no 'playing'
+        // event fires and Web Audio never starts (Pause → Play).
         if (llExactAudio.useAudio) {
-            try { a.muted = true; } catch(e) {}
+            llPlayer.syncNativeMute();
             if (!a.src || a.src === window.location.href) {
                 a.src = llPlayer.buildUrl();
                 a.load();
@@ -781,9 +836,10 @@ var llPlayer = {
         if (llExactAudio.useAudio) {
             $('#ll_status_text').html('<span class="text-warning">Re-syncing (AudioContext)...</span>');
             llPlayer.isPlaying = true;
-            // Refresh the muted native keepalive too so it stays warm
+            llExactAudio.fallbackActive = false;
+            llPlayer.syncNativeMute();
+            // Refresh the native keepalive too so it stays warm and audible
             try {
-                llPlayer.audio.muted = true;
                 llPlayer.audio.src = llPlayer.buildUrl();
                 llPlayer.audio.load();
                 var rp = llPlayer.audio.play(); if (rp && rp.catch) rp.catch(function(){});
@@ -820,17 +876,14 @@ var llPlayer = {
             $('#ll_mute_btn').val('Mute');
             var v = document.getElementById('ll_vol').value;
             llPlayer.audio.volume = v / 100;
-            // WebAudio owns output when active — keep native muted, raise gain
-            if (!(llExactAudio.useAudio && llExactAudio.gain)) {
-                llPlayer.audio.muted = false;
-            }
+            llPlayer.syncNativeMute();
             try { if (llExactAudio.gain) llExactAudio.applyGain(); } catch(e) {}
         } else {
             llPlayer.preMuteVol = document.getElementById('ll_vol').value;
             llPlayer.isMuted = true;
             $('#ll_mute_btn').val('Unmute');
             try { if (llExactAudio.gain) llExactAudio.applyGain(); } catch(e) {}
-            if (!llExactAudio.gain) { llPlayer.audio.muted = true; }
+            llPlayer.syncNativeMute();
         }
     },
 
@@ -992,7 +1045,7 @@ var llPlayer = {
                     }
                     if (isBackgroundPlaying && !s.current_song && d.background_status) {
                         var bgType = d.background_status ? 'background' : 'afterhours';
-                        $('#ll_nowplaying').html(escHtml(media) + ' <span class="ll-badge" style="background:#198754;color:#fff;font-size:11px;">via ' + escHtml(bgType) + '</span>');
+                        $('#ll_nowplaying').html(escHtml(media) + ' <span class="ll-badge" style="background:var(--bs-success);color:var(--bs-white);font-size:11px;">via ' + escHtml(bgType) + '</span>');
                     }
                 }
                 // Also show background status in playlist/sequence when idle
@@ -1157,7 +1210,7 @@ var llPlayer = {
                 if (d.afterhours_status) html += '<tr><td style="padding:4px;"><b>AfterHours:</b></td><td style="padding:4px;"><span class="text-success">Plugin responding</span> <span data-bs-toggle="tooltip" data-bs-html="true" data-bs-title="AfterHours plugin responded to status check. Its stream is detected as fallback when FPP idle."><img src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span></td></tr>';
                 html += '<tr><td style="padding:4px;"><b>Stream URL:</b></td><td style="padding:4px;"><code>api/plugin/fpp-ListenLive/stream</code> <a href="api/plugin/fpp-ListenLive/stream" target="_blank" style="margin-left:8px;">Open directly</a></td></tr>';
                 if (!det.ffmpeg) {
-                    html += '<tr><td colspan="2" style="padding:8px;"><span class="text-warning">FFmpeg is required for live capture. Install via FPP OS or <code>sudo apt install ffmpeg</code>. File-sync fallback will be used until then.</span></td></tr>';
+                    html += '<tr><td colspan="2" style="padding:8px;"><span class="text-warning">FFmpeg is required for live capture. Install it via the declared dependency in the FPP Plugin Manager (or <code>apt-get install ffmpeg</code> on older releases). File-sync fallback will be used until then.</span></td></tr>';
                 }
                 if (d.fpp_reachable === false) {
                     html += '<tr><td colspan="2" style="padding:8px;"><span class="text-warning">FPPD not reachable — live Now Playing unavailable, but live capture and file-sync may still work.</span></td></tr>';

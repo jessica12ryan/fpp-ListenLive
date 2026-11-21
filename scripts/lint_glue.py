@@ -19,6 +19,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 API = ROOT / "api.php"
 LISTEN = ROOT / "listen.php"
 TIMING = ROOT / "src" / "Timing.php"
+CPP = ROOT / "src" / "FPPListenLiveSync.cpp"
 
 failures = []
 
@@ -31,6 +32,7 @@ def read(p):
 api = read(API)
 listen = read(LISTEN)
 timing = read(TIMING)
+cpp = read(CPP)
 
 # 1. Timing helper is required early in api.php, not inside a function
 if "require_once __DIR__ . '/src/Timing.php'" not in api and "src/Timing.php" not in api:
@@ -65,8 +67,12 @@ if "llClock" not in listen or "monotonicMs" not in listen:
     fail("listen.php does not define llClock.monotonicMs — monotonic vs wall split missing on client")
 if "performance.now" not in listen:
     fail("listen.php does not use performance.now — should use monotonic clock, not Date.now")
-# llClock must appear before llPlayer so init can use it
-if listen.find("llClock") > listen.find("var llPlayer"):
+# llClock must appear before llPlayer so init can use it. Guard both lookups:
+# str.find() returns -1 for a missing string, which made the old comparison
+# report a false positive whenever "var llPlayer" was absent.
+clock_pos = listen.find("llClock")
+player_pos = listen.find("var llPlayer")
+if clock_pos >= 0 and player_pos >= 0 and clock_pos > player_pos:
     fail("listen.php defines llClock AFTER llPlayer — must be before so playing handler can use llClock.monotonicMs()")
 # playing handler must use monotonic, not Date.now
 if re.search(r"streamStartTime\s*=\s*Date\.now\(\)", listen):
@@ -78,10 +84,8 @@ if "llMSE" in listen or "MSE gapless" in listen:
 # 5. Half-second dedup — mirrors FPPPulseMesh.cpp:131 curTS = seconds*2
 if "lastElapsedHalf" not in listen or "curHalf" not in listen:
     fail("listen.php does not implement half-second dedup (lastElapsedHalf/curHalf) — should mirror PulseMesh curTS*2")
-if "shouldSend" not in timing and "BYTES_PER_SEC" not in timing:
-    pass  # not required
-if "* 2" not in listen and "Math.floor" not in listen:
-    fail("listen.php dedup does not use *2 half-second quantization")
+if "* 2" not in listen or "Math.floor" not in listen:
+    fail("listen.php dedup does not use *2 half-second quantization (needs both * 2 and Math.floor)")
 # poll interval must be 500, not 2000
 if "setInterval(llPlayer.refreshStatus, 2000)" in listen:
     fail("listen.php still polls at 2000ms — should be 500ms with dedup")
@@ -91,7 +95,7 @@ if "setInterval(llPlayer.refreshStatus, 500)" not in listen:
 # 6. Track-change announced timestamp for confidence (deadline-at-read)
 if "lastMediaAnnouncedAtMono" not in listen:
     fail("listen.php does not track lastMediaAnnouncedAtMono — confidence deadline cannot be evaluated at read time")
-if "IDLE_SETTLE_MS" not in timing and "250" not in timing:
+if "IDLE_SETTLE_MS" not in timing or "250" not in timing:
     fail("src/Timing.php does not define IDLE_SETTLE_MS 250 — settle window missing")
 
 # 7. Log throttle like PulseMesh m_sendErrorCount
@@ -116,6 +120,23 @@ else:
         fail("test/timing_test.php does not exercise seekPosition")
     if "confidence" not in t:
         fail("test/timing_test.php does not exercise confidence")
+
+# 10. Native clock C++ must include fpp-json.h (it reads JSON from FPP without
+# pulling in a second JSON implementation).
+if 'fpp-json.h' not in cpp:
+    fail('src/FPPListenLiveSync.cpp does not include "fpp-json.h" — native clock JSON glue missing')
+
+# 11. Hardening: no permissive CORS header and no destructive plugin endpoints.
+# FPP's Plugin Manager owns install/reinstall/uninstall/fppd-restart; exposing
+# them over HTTP lets any page on the LAN stop or replace the player.
+if "Access-Control-Allow-Origin" in api:
+    fail("api.php still emits Access-Control-Allow-Origin — plugin API must not opt into cross-origin reads")
+registered = re.findall(r"['\"]endpoint['\"]\s*=>\s*['\"]([^'\"]+)['\"]", api)
+destructive = {"update", "reinstall", "uninstall", "restart-fppd", "restartfppd",
+               "restart_fppd", "restart", "install"}
+for ep in registered:
+    if ep.strip().lower() in destructive:
+        fail("api.php exposes destructive endpoint '%s' — only read-only check-updates is allowed" % ep)
 
 if failures:
     print("glue lint FAILED:")

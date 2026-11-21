@@ -81,7 +81,8 @@ class LLSyncTiming
                 if (isset($bgStatus[$k]) && is_numeric($bgStatus[$k])) return (float)$bgStatus[$k];
                 if (isset($bgStatus['data'][$k]) && is_numeric($bgStatus['data'][$k])) return (float)$bgStatus['data'][$k];
             }
-            if (isset($bgStatus['trackElapsed'])) return (float)$bgStatus['trackElapsed'];
+            // Do not cast a non-numeric value here: it would yield 0.0 and
+            // shadow a valid fppd elapsed value below.
         }
         if ($fppStatus !== null && isset($fppStatus['seconds_elapsed']) && is_numeric($fppStatus['seconds_elapsed'])) {
             return (float)$fppStatus['seconds_elapsed'];

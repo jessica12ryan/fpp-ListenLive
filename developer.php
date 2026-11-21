@@ -1,39 +1,17 @@
 <?php
-$pluginDir = __DIR__;
-
+/**
+ * #############################################################
+ * ## Listen Live Plugin for FPP (fpp-ListenLive)             ##
+ * ## Author: jessica12ryan                                   ##
+ * ## URL: https://github.com/jessica12ryan/fpp-ListenLive    ##
+ * #############################################################
+ * ## developer.php                                           ##
+ * #############################################################
+ */
 $uiLevel = (int)($settings['uiLevel'] ?? 0);
 $showLogsTab = $uiLevel >= 1;
 $showDevTab = $uiLevel >= 3;
 ?>
-<style>
-.tab-bar { display: flex; flex-wrap: wrap; gap: 0; margin-bottom: 12px; border-bottom: 2px solid var(--bs-border-color); }
-.tab-bar a { display: block; padding: 8px 18px; text-decoration: none; color: var(--bs-body-color); background: var(--bs-tertiary-bg); border: 1px solid var(--bs-border-color); border-bottom: none; border-radius: 4px 4px 0 0; margin-bottom: -2px; margin-right: 3px; font-size: 14px; }
-.tab-bar a.active { background: var(--bs-body-bg); color: var(--bs-body-color); border-color: var(--bs-border-color); border-bottom-color: var(--bs-body-bg); font-weight: 600; }
-.tab-bar a:hover:not(.active) { background: var(--bs-secondary-bg); }
-.btn-danger { background: var(--bs-danger); color: var(--bs-white, #fff); border: 1px solid var(--bs-danger); padding: 10px 28px; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 600; box-sizing: border-box; white-space: nowrap; display: inline-block; }
-.btn-danger:hover { filter: brightness(0.9); }
-.btn-danger:disabled { opacity: 0.6; cursor: not-allowed; }
-.btn-warning { background: var(--bs-warning); color: var(--bs-dark, #212529); border: 1px solid var(--bs-warning); padding: 10px 28px; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 600; box-sizing: border-box; white-space: nowrap; display: inline-block; }
-.btn-warning:hover { filter: brightness(0.9); }
-.btn-warning:disabled { opacity: 0.6; cursor: not-allowed; }
-.modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 9999; display: flex; align-items: center; justify-content: center; }
-.modal-box { background: var(--bs-body-bg); color: var(--bs-body-color); border: 1px solid var(--bs-border-color); border-radius: 8px; padding: 24px 32px; max-width: 420px; width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.3); text-align: center; }
-.modal-message { font-size: 15px; line-height: 1.5; margin-bottom: 20px; }
-.modal-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
-.modal-btn { padding: 10px 24px; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 600; border: none; }
-.modal-btn-primary { background: var(--bs-danger); color: var(--bs-white, #fff); }
-.modal-btn-primary:hover { filter: brightness(0.9); }
-.modal-btn-warning { background: var(--bs-warning); color: var(--bs-dark, #212529); }
-.modal-btn-warning:hover { filter: brightness(0.9); }
-.modal-btn-default { background: var(--bs-secondary); color: var(--bs-white, #fff); }
-.modal-btn-default:hover { filter: brightness(0.9); }
-.modal-btn-info { background: var(--bs-primary); color: var(--bs-white, #fff); }
-.modal-btn-info:hover { filter: brightness(0.9); }
-.btn-info { background: var(--bs-primary); color: var(--bs-white, #fff); border: 1px solid var(--bs-primary); padding: 10px 28px; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 600; box-sizing: border-box; white-space: nowrap; display: inline-block; }
-.btn-info:hover { filter: brightness(0.9); }
-.btn-info:disabled { opacity: 0.6; cursor: not-allowed; }
-</style>
-
 <?php include __DIR__ . '/tabs.inc'; ?>
 
 <div style="margin:0 auto;">
@@ -42,90 +20,31 @@ $showDevTab = $uiLevel >= 3;
         <div class="p-3">
 
             <h3 class="text-primary">Updates</h3>
-            <p>
-                Check whether the plugin is up to date with the latest version on GitHub.
-            </p>
-            <div style="display:flex; gap:10px; align-items:start;">
-                <div>
-                    <button type="button" class="btn-info" id="check_updates_btn" onclick="llDev.checkUpdates();">&#8635; Check for Updates</button>
-                </div>
-                <div id="update_result"></div>
+            <p>Check whether a newer version is available on GitHub. To install updates, reinstall, or remove the plugin, use <b>Content Setup → Plugin Manager</b> — the plugin never performs those actions itself.</p>
+            <div>
+                <button type="button" class="buttons" id="check_updates_btn" onclick="llDev.checkUpdates();">&#8635; Check for Updates</button>
+                <span id="update_result" class="ms-2"></span>
             </div>
 
-            <hr style="margin:20px 0;">
+            <hr class="my-3">
 
-            <h3 class="text-warning">Plugin Management</h3>
-            <p>
-                Reinstall the plugin to apply file updates, or uninstall it from the system.
-            </p>
-            <div style="display:flex; gap:10px;">
-                <button type="button" class="btn-warning" id="reinstall_btn" onclick="llDev.reinstall();">&#9888; Reinstall Plugin</button>
-                <button type="button" class="btn-danger" id="uninstall_btn" onclick="llDev.uninstall();">&#9888; Uninstall Plugin</button>
+            <h3>Diagnostics</h3>
+            <p>Run a quick check of FFmpeg, PulseAudio, ALSA, PipeWire, and FPPD reachability.</p>
+            <div>
+                <button type="button" class="buttons" id="diag_btn" onclick="llDev.diagnose();">Run Diagnostics</button>
             </div>
+            <div id="diag_result" class="mt-2"></div>
 
-            <hr style="margin:20px 0;">
+            <hr class="my-3">
 
-            <h3 class="text-danger">Diagnostics</h3>
-            <p>
-                Run a quick check of FFmpeg, PulseAudio, ALSA, and FPPD reachability.
-            </p>
-            <div style="display:flex; gap:10px;">
-                <button type="button" class="btn-info" id="diag_btn" onclick="llDev.diagnose();">Run Diagnostics</button>
-            </div>
-            <div id="diag_result" style="margin-top:10px;"></div>
-
-            <hr style="margin:20px 0;">
-
-            <h3>Request FPPD Restart</h3>
-            <p>Ask FPP to restart between sequences (safe, never mid-show) — useful after changing audio settings.</p>
-            <div style="display:flex; gap:10px;">
-                <button type="button" class="buttons" id="restart_btn" onclick="llDev.requestRestart();">Request Restart</button>
-            </div>
-            <div id="restart_result" style="margin-top:8px;"></div>
+            <h3>Plugin Management</h3>
+            <p class="text-secondary">Installation, updates, reinstalls, uninstalls and FPPD restarts are managed by FPP. This page never restarts FPPD or changes files outside this plugin.</p>
         </div>
     </fieldset>
 </div>
 
-<div id="modal_overlay" class="modal-overlay" style="display:none;">
-    <div class="modal-box">
-        <div class="modal-message" id="modal_message"></div>
-        <div class="modal-actions" id="modal_actions"></div>
-    </div>
-</div>
-
 <script>
 var llDev = {
-    showModal: function(message, buttons) {
-        $('#modal_message').html(message);
-        var $actions = $('#modal_actions').empty();
-        $.each(buttons, function(i, btn) {
-            $actions.append(
-                $('<button>', {
-                    text: btn.label,
-                    class: 'modal-btn ' + (btn['class'] || 'modal-btn-default'),
-                    click: function() {
-                        if (btn.onClick) btn.onClick();
-                        else llDev.hideModal();
-                    }
-                })
-            );
-        });
-        $('#modal_overlay').show();
-    },
-    hideModal: function() {
-        $('#modal_overlay').hide();
-    },
-    showConfirm: function(message, onConfirm, confirmClass) {
-        llDev.showModal(message, [
-            { label: 'Cancel', 'class': 'modal-btn-default', onClick: llDev.hideModal },
-            { label: 'Confirm', 'class': confirmClass || 'modal-btn-primary', onClick: function() { llDev.hideModal(); if (onConfirm) onConfirm(); } }
-        ]);
-    },
-    showAlert: function(message) {
-        llDev.showModal(message, [
-            { label: 'OK', 'class': 'modal-btn-primary' }
-        ]);
-    },
     diagnose: function() {
         $('#diag_result').html('<span class="text-warning">Running diagnostics...</span>');
         $.ajax({
@@ -135,134 +54,47 @@ var llDev = {
             data: '{}',
             dataType: 'json',
             success: function(d) {
-                var html = '<table class="fppTable" style="width:auto;">';
+                var html = '<div class="table-responsive"><table class="fppTable table">';
                 if (d.results) {
-                    for (var i=0;i<d.results.length;i++) {
-                        var r=d.results[i];
-                        html += '<tr><td>' + escHtml(r.check) + '</td><td>' + (r.ok ? '<span class="text-success">&#10003;</span>' : '<span class="text-danger">&#10007;</span>') + (r.detail ? ' <span class="text-secondary">(' + escHtml(r.detail) + ')</span>' : '') + '</td></tr>';
+                    for (var i = 0; i < d.results.length; i++) {
+                        var r = d.results[i];
+                        html += '<tr><td>' + escHtml(r.check) + '</td><td>' +
+                            (r.ok ? '<span class="text-success">&#10003;</span>' : '<span class="text-danger">&#10007;</span>') +
+                            (r.detail ? ' <span class="text-secondary small">(' + escHtml(r.detail) + ')</span>' : '') +
+                            '</td></tr>';
                     }
                 }
-                html += '</table>';
+                html += '</table></div>';
                 $('#diag_result').html(html);
             },
             error: function() { $('#diag_result').html('<span class="text-danger">Failed to run diagnostics</span>'); }
         });
     },
-    requestRestart: function() {
-        $('#restart_result').html('<span class="text-warning">Requesting restart...</span>');
-        $.ajax({
-            url: 'api/plugin/fpp-ListenLive/restart-fppd',
-            type: 'POST',
-            contentType: 'application/json',
-            data: '{}',
-            dataType: 'json',
-            success: function(d) { $('#restart_result').html('<span class="text-success">' + escHtml(d.message || 'Restart flag set') + '</span>'); },
-            error: function() { $('#restart_result').html('<span class="text-danger">Failed</span>'); }
-        });
-    },
     checkUpdates: function() {
-        $('#check_updates_btn').html('&#8635; Check for Updates').prop('disabled', true).attr('onclick', 'llDev.checkUpdates();');
+        $('#check_updates_btn').prop('disabled', true);
         $('#update_result').html('<span class="text-secondary">Checking...</span>');
         $.ajax({
             url: 'api/plugin/fpp-ListenLive/check-updates',
             type: 'GET',
             dataType: 'json',
             success: function(data) {
-                if (data.updateAvailable) {
-                    $('#check_updates_btn').html('&#8635; Install Updates').prop('disabled', false).attr('onclick', 'llDev.installUpdates();');
-                    $('#update_result').html('<span class="text-warning fw-semibold">&#9888; Update available!</span><br><span class="text-secondary small">Local: ' + data.localSha + '<br>Remote: ' + data.remoteSha + '<br><a href="https://github.com/jessica12ryan/fpp-ListenLive" target="_blank">View on GitHub</a></span>');
-                } else {
-                    $('#check_updates_btn').html('&#8635; Check for Updates').prop('disabled', false).attr('onclick', 'llDev.checkUpdates();');
-                    $('#update_result').html('<span class="text-success fw-semibold">&#10003; Plugin is up to date</span><br><span class="text-secondary small">' + data.localSha + '</span>');
-                }
+                var msg = data.updateAvailable
+                    ? '<span class="text-warning fw-semibold">Update available</span>'
+                    : '<span class="text-success fw-semibold">Up to date</span>';
+                if (data.localSha) msg += ' <span class="text-secondary small">' + escHtml(data.localSha) + '</span>';
+                msg += ' <a href="https://github.com/jessica12ryan/fpp-ListenLive" target="_blank" rel="noopener">View on GitHub</a>';
+                $('#update_result').html(msg);
             },
-            error: function(xhr) {
-                $('#check_updates_btn').html('&#8635; Check for Updates').prop('disabled', false).attr('onclick', 'llDev.checkUpdates();');
-                var msg = 'Could not reach the plugin API.';
-                try {
-                    var resp = JSON.parse(xhr.responseText);
-                    if (resp.error) msg = resp.error;
-                } catch(e) {}
-                $('#update_result').html('<span class="text-danger">' + msg + '</span>');
-            }
+            error: function() { $('#update_result').html('<span class="text-danger">Could not check for updates</span>'); },
+            complete: function() { $('#check_updates_btn').prop('disabled', false); }
         });
-    },
-    installUpdates: function() {
-        llDev.showConfirm('This will update the plugin to the latest version from GitHub. Your configuration will be preserved. Are you sure?', function() {
-            $('#check_updates_btn').prop('disabled', true);
-            $.ajax({
-                url: 'api/plugin/fpp-ListenLive/update',
-                type: 'POST',
-                contentType: 'application/json',
-                dataType: 'json',
-                success: function() {
-                    location.reload();
-                },
-                error: function(xhr) {
-                    var msg = 'Could not reach the plugin API.';
-                    try {
-                        var resp = JSON.parse(xhr.responseText);
-                        if (resp.error) msg = resp.error;
-                    } catch(e) {}
-                    $('#check_updates_btn').prop('disabled', false);
-                    llDev.showAlert(msg);
-                }
-            });
-        }, 'modal-btn-info');
-    },
-    reinstall: function() {
-        llDev.showConfirm('This will reinstall the plugin. Your configuration will be preserved. Are you sure?', function() {
-            $('#reinstall_btn').prop('disabled', true);
-            $.ajax({
-                url: 'api/plugin/fpp-ListenLive/reinstall',
-                type: 'POST',
-                contentType: 'application/json',
-                dataType: 'json',
-                success: function() {
-                    location.reload();
-                },
-                error: function(xhr) {
-                    var msg = 'Could not reach the plugin API.';
-                    try {
-                        var resp = JSON.parse(xhr.responseText);
-                        if (resp.error) msg = resp.error;
-                    } catch(e) {}
-                    $('#reinstall_btn').prop('disabled', false);
-                    llDev.showAlert(msg);
-                }
-            });
-        }, 'modal-btn-warning');
-    },
-    uninstall: function() {
-        llDev.showConfirm('This will completely remove the plugin and all its files. Configuration will be lost. FPPD will be prompted to restart. Are you sure?', function() {
-            $('#uninstall_btn').prop('disabled', true);
-            $.ajax({
-                url: 'api/plugin/fpp-ListenLive/uninstall',
-                type: 'POST',
-                contentType: 'application/json',
-                dataType: 'json',
-                success: function() {
-                    window.location.href = 'plugins.php?tab=available';
-                },
-                error: function(xhr) {
-                    var msg = 'Could not reach the plugin API.';
-                    try {
-                        var resp = JSON.parse(xhr.responseText);
-                        if (resp.error) msg = resp.error;
-                    } catch(e) {}
-                    $('#uninstall_btn').prop('disabled', false);
-                    llDev.showAlert(msg);
-                }
-            });
-        }, 'modal-btn-primary');
     }
 };
 
-function escHtml(s){ if(s==null)return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
-$(document).on('click', '#modal_overlay', function(e) {
-    if (e.target === this) llDev.hideModal();
-});
+function escHtml(s) {
+    if (s == null) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
 </script>
 
 <?php include __DIR__ . '/footer.inc'; ?>

@@ -1,23 +1,28 @@
 <h3>Listen Live — About</h3>
-<p>Stream your show's <b>live audio</b> directly in the FPP web UI — hear exactly what your audience hears without leaving the browser.</p>
+<p>Monitor your show's <b>live audio</b> directly in the FPP web UI, frame-locked to FPP's clock when MultiSync is enabled.</p>
 
 <h4>Features</h4>
 <ul>
-    <li>One-click HTML5 audio player on <b>Content Setup → Listen Live → Listen</b> with volume + mute (remembered per browser).</li>
-    <li>Live capture via <b>PulseAudio monitor</b> (PipeWire) or <b>ALSA</b> using FFmpeg → MP3 (<code>libmp3lame</code>).</li>
-    <li>Automatic <b>File Sync fallback</b> — streams the current media file in sync when capture is unavailable.</li>
-    <li>Live status: current playlist, sequence, song, and elapsed time from <code>/api/fppd/status</code>.</li>
-    <li>Auto-reconnect on drop, ~1–3s latency on LAN, multisync-aware timing via the native <code>libfpp-ListenLive.so</code> (<code>/api/plugin-apis/ListenLive/sync</code>).</li>
-    <li>Works with FPP 8.x, 9.x, and 10.x.</li>
+    <li>Web Audio <b>Exact frame sync</b>, on by default on first visit: the MultiSync monotonic clock is extrapolated against a wall-clock reference and short media chunks are scheduled sample-accurately.</li>
+    <li>Small ~0.6–1.5 s chunk queue for gapless playback; live drift is shown in <code>#ll_exact_status</code> on the Listen page.</li>
+    <li>PHP status-poll fallback when the native sync library or MultiSync is unavailable.</li>
+    <li>Automatic fallback after repeated chunk failures to the raw <code>/stream</code> (<code>audio/mpeg</code>), clearly labeled <b>best-effort / NOT frame-exact</b>.</li>
+    <li>Live capture via PipeWire/PulseAudio monitor or ALSA using FFmpeg → MP3 (<code>libmp3lame</code>); File Sync capture source also available.</li>
+    <li>Status: playlist, sequence, song, and elapsed time from <code>/api/fppd/status</code>, polled every 500 ms on the Listen page.</li>
+    <li>Volume is remembered per browser in <code>localStorage</code>; mute is never persisted — each page load starts unmuted.</li>
+    <li>Works with FPP 8.x, 9.x, 10.x, and 11.x.</li>
 </ul>
 
 <h4>How It Works</h4>
 <ol>
-    <li>Browser requests <code>api/plugin/fpp-ListenLive/stream</code>.</li>
-    <li>Plugin builds <code>ffmpeg -f pulse/alsa -i &lt;device&gt; -codec:a libmp3lame -b:a 128k -f mp3 -</code> and pipes MP3 with <code>Content-Type: audio/mpeg</code>.</li>
-    <li>HTML5 <code>&lt;audio&gt;</code> plays the stream; the <b>Status</b> tab polls <code>/api/fppd/status</code> every 5s and the <b>Listen</b> tab polls the monotonic sync clock.</li>
-    <li>If capture fails, the current media file (under <code>/home/fpp/media/music</code>) is streamed with a seek to <code>seconds_elapsed</code>.</li>
+    <li>The Listen page reads <code>api/plugin/fpp-ListenLive/sync</code>, a wrapper around the native MultiSync clock (or the PHP status-poll fallback).</li>
+    <li>It fetches short chunks from <code>api/plugin/fpp-ListenLive/media?file=...&amp;seek=...&amp;duration=1.5</code>, decodes them with Web Audio, and schedules them against the master clock.</li>
+    <li>If chunk fetch/decode fails repeatedly, playback switches to <code>api/plugin/fpp-ListenLive/stream</code> — a live capture of FPP's audio output. Browser buffering makes that path best-effort, not frame-exact.</li>
+    <li>Enable MultiSync in FPP Settings → MultiSync for exact timing across players and remotes.</li>
 </ol>
+
+<h4>Privacy</h4>
+<p>Audio is captured on the FPP host and streamed to your browser on the LAN. Nothing is sent off-box, audio is not stored, and there is no telemetry, advertising, or donations.</p>
 
 <h4>Links</h4>
 <ul>

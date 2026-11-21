@@ -8,8 +8,10 @@
 #include <string>
 #include <cstring>
 #include <mutex>
+#include <atomic>
 #include <chrono>
-#include <jsoncpp/json/json.h>
+// FPP's portability shim picks the right jsoncpp header on Debian and macOS.
+#include "fpp-json.h"
 
 #include "Plugin.h"
 #include "MultiSync.h"
@@ -206,7 +208,7 @@ private:
         j["has_media"] = !m_lastFile.empty() && m_lastSeconds >= 0;
         j["media"] = m_lastFile;
         j["seconds"] = m_lastSeconds;
-        j["frame"] = (m_lastSeconds >= 0) ? (int)(m_lastSeconds * 44100.0f) : -1;
+        j["frame"] = (m_lastSeconds >= 0) ? (int)(m_lastSeconds * 44100.0) : -1;
         j["last_media_half"] = m_lastMediaHalf;
         // Extrapolate current seconds based on monotonic delta (frame-exact between packets)
         if (!m_lastFile.empty() && m_lastSeconds >= 0 && m_lastMono > 0) {
@@ -281,10 +283,17 @@ private:
             j["epoch_ms"] = (Json::Int64)m_epochWall;
             j["has_media"] = !m_lastFile.empty() && m_lastSeconds >= 0;
         }
-        // Write atomically via tmp rename into plugindata
+        // Write atomically via tmp rename into plugindata. Use a unique temp
+        // name: Send* and Received* callbacks can run concurrently, and a
+        // shared .tmp file would interleave two different sync snapshots.
         std::string plugindataDir = getFPPMediaDir("/plugindata/fpp-ListenLive");
+        size_t slash = plugindataDir.find_last_of('/');
+        if (slash != std::string::npos) mkdir(plugindataDir.substr(0, slash).c_str(), 0775);
         mkdir(plugindataDir.c_str(), 0775);
-        std::string tmpPath = plugindataDir + "/ll_sync.json.tmp";
+        static std::atomic<int> s_tmpCounter{0};
+        std::string tmpPath = plugindataDir + "/ll_sync.json.tmp." +
+                              std::to_string(monotonicMs()) + "." +
+                              std::to_string(++s_tmpCounter);
         std::string finalPath = plugindataDir + "/ll_sync.json";
         FILE *f = fopen(tmpPath.c_str(), "w");
         if (f) {
@@ -293,7 +302,7 @@ private:
             std::string out = Json::writeString(b, j);
             fwrite(out.c_str(), 1, out.size(), f);
             fclose(f);
-            rename(tmpPath.c_str(), finalPath.c_str());
+            if (rename(tmpPath.c_str(), finalPath.c_str()) != 0) remove(tmpPath.c_str());
         }
     }
 

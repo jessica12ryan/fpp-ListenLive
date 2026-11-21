@@ -1,43 +1,41 @@
 <h3>Listen Live — Listen</h3>
-<p>Play the FPP's live audio in your browser. What you hear is what the audience hears — the live mix captured from PipeWire/PulseAudio or ALSA and streamed as <code>audio/mpeg</code> via <code>api/plugin/fpp-ListenLive/stream</code>. When capture is unavailable the plugin falls back to streaming the current media file in sync.</p>
+<p>Play FPP's audio in your browser. The primary path is Web Audio <b>Exact frame sync</b>: short timestamped media chunks are decoded and scheduled sample-accurately against FPP's MultiSync clock, with only ~0.6–1.5 s buffered for gapless playback. If chunk fetch/decode fails a few times, the player switches to the raw <code>audio/mpeg</code> live stream and labels it <b>best-effort / NOT frame-exact</b> — browser buffering adds unmeasured latency, so that path cannot be frame-locked to MultiSync.</p>
 
 <h4>Player</h4>
 <ul>
-    <li><b>Idle / Live badge</b> — Shows connection state. <b>● LIVE</b> (red, pulsing) means audio is streaming. <b>Idle</b> (grey) means no stream. <b>Warn</b> (amber) indicates an error — see the status text. Hover the badge for no extra detail; state is self-explanatory.</li>
-    <li><b>Now Playing</b> — Current media from <code>/api/fppd/status</code> (<code>current_song</code> or <code>current_sequence</code>). Shows “Nothing playing — FPP is idle” when no media is active. Help icon to the right of the field explains the source.</li>
-    <li><b>Wave animation</b> — Visual feedback that the page is live. Animated when playing, paused when stopped.</li>
-    <li><b>&lt;audio&gt; element</b> — Standard HTML5 player with native controls. Use it or the buttons below.</li>
-    <li><b>Timing bar</b> — Shows <b>elapsed / duration</b> and remaining time with a progress bar. Visible only while playing. Duration comes from FPP status or BackgroundMusic track length.</li>
+    <li><b>Idle / Live badge</b> — <b>● LIVE</b> (red, pulsing) means audio is streaming. <b>Idle</b> (grey) means no stream. <b>Warn</b> (amber) indicates an error — see the status text.</li>
+    <li><b>Now Playing</b> — Current media from <code>/api/fppd/status</code> (<code>current_song</code> or <code>current_sequence</code>). Shows "Nothing playing — FPP is idle" when no media is active; status is polled every 500 ms.</li>
+    <li><b>Wave animation</b> — Visual feedback that the page is live. Animated while playing, paused when stopped.</li>
+    <li><b>&lt;audio&gt; element</b> — Native HTML5 controls. With Exact frame sync active, Web Audio owns the sound and the native element is kept muted as a connection/fallback monitor.</li>
+    <li><b>Timing bar</b> — Shows elapsed / duration and remaining time. Duration comes from FPP status or BackgroundMusic track length.</li>
 </ul>
 
 <h4>Controls</h4>
 <ul>
-    <li><b>▶ Play</b> — Starts streaming. Appends a cache-buster (<code>?t=Date.now()</code>) to force a fresh FFmpeg pipeline. Shows “Connecting…” then “Streaming live audio”.</li>
-    <li><b>■ Stop</b> — Stops playback, clears <code>src</code>, resets badge to <b>Stopped</b> and hides the timing bar.</li>
-    <li><b>↻ Reconnect</b> — Forces a reconnect with a new URL — useful after a network drop or track change. When Exact Audio is enabled it re-syncs the AudioContext graph.</li>
-    <li><b>Volume slider</b> — Sets <code>audio.volume</code> 0–100%, label shows percent. Stored per browser in <code>localStorage fpp-ListenLive-volume</code>.</li>
-    <li><b>Mute / Unmute</b> — Toggles <code>audio.muted</code>; remembers pre-mute volume.</li>
-    <li><b>Exact frame sync</b> (checkbox) — When checked, enables AudioContext gapless scheduling from the monotonic master clock (<code>/api/plugin-apis/ListenLive/sync</code>). Status shows <code>exact • …</code> with drift. Uncheck for native &lt;audio&gt; drift.</li>
+    <li><b>▶ Play</b> — Starts playback; with Exact sync active this anchors the Web Audio schedule to the FPP clock.</li>
+    <li><b>■ Stop</b> — Stops playback, clears the source, resets the badge to <b>Stopped</b>, and hides the timing bar.</li>
+    <li><b>↻ Reconnect</b> — Forces a fresh connection and re-syncs the audio graph — useful after a network drop, a track change, or a fallback to the raw stream.</li>
+    <li><b>Volume slider</b> — Sets volume 0–100%. Stored per browser in <code>localStorage</code> (<code>fpp-ListenLive-volume</code>).</li>
+    <li><b>Mute / Unmute</b> — Mutes output but is <b>never persisted</b>: every page load starts unmuted.</li>
+    <li><b>Exact frame sync</b> (checkbox) — Web Audio chunk scheduling, <b>on by default on the first visit</b>. Needs MultiSync enabled (FPP Settings → MultiSync) for exact timing across players/remotes. The status text <code>#ll_exact_status</code> shows sync state and drift; uncheck it to use the native player path.</li>
 </ul>
 
-<h4>Status Grid (read-only info, each value has ? help to its right)</h4>
+<h4>Status Grid (read-only info)</h4>
 <ul>
-    <li><b>Source</b> — Configured audio source (<code>auto</code>, <code>pulse</code>, <code>alsa</code>, <code>file</code>).</li>
-    <li><b>Bitrate</b> — Encoding setting (<code>128k / 44100 Hz / Stereo</code> etc) from Config.</li>
-    <li><b>Elapsed</b> — Playback position <code>elapsed / remaining</code> from FPP status.</li>
+    <li><b>Source</b> — Configured capture source (<code>auto</code>, <code>pulse</code>, <code>pipewire</code>, <code>alsa</code>, <code>file</code>).</li>
+    <li><b>Bitrate</b> — Encoding setting (<code>128k / 44100 Hz / Stereo</code>, etc.) from Config.</li>
+    <li><b>Elapsed</b> — Playback position from FPP status.</li>
     <li><b>Playlist / Sequence</b> — Current playlist and sequence names from FPP status.</li>
 </ul>
 
-<h4>Stream Info (diagnostics table — each row has ? help to the right of the value except Stream URL)</h4>
+<h4>Stream Info (diagnostics table)</h4>
 <ul>
-    <li><b>FFmpeg</b> — Whether FFmpeg was found and its path, plus PipeWire demuxer support.</li>
-    <li><b>PipeWire</b> — PipeWire availability and detected monitor sources (<code>fpp_group_default.monitor</code> preferred).</li>
-    <li><b>PulseAudio</b> — PulseAudio / pipewire-pulse availability and sources.</li>
-    <li><b>ALSA</b> — ALSA availability and devices (<code>default, hw:0,0 …</code>).</li>
-    <li><b>Detected media (display only)</b> — Fallback media found when FPP idle — display only, live capture streams the live mix regardless.</li>
+    <li><b>FFmpeg</b> — Whether FFmpeg was found and its path, plus capture backend support.</li>
+    <li><b>PipeWire / PulseAudio / ALSA</b> — Availability and detected sources/devices; the FPP group monitor is preferred for full-show capture.</li>
+    <li><b>Detected media</b> — Media found when FPP is idle; display only.</li>
     <li><b>BackgroundMusic / AfterHours</b> — Whether those optional plugins are responding.</li>
-    <li><b>Stream URL</b> — <code>api/plugin/fpp-ListenLive/stream</code> with “Open directly” link. No tooltip — the link itself is the action.</li>
+    <li><b>Stream URL</b> — <code>api/plugin/fpp-ListenLive/stream</code> with an "Open directly" link. This raw stream is best-effort, not frame-exact.</li>
 </ul>
 
-<p><b>Tip:</b> Keep this tab open on the same LAN as FPP for 1–3s latency. If you hear silence, start a playlist/schedule so audio is playing, then hit <b>Test Capture</b> on the <b>Config</b> tab.</p>
-<p>Press <b>F1</b> again to close this help. Detailed guide is also on the <b>Help</b> tab.</p>
+<p><b>Tip:</b> Keep this tab open on the same LAN as FPP. For exact timing, enable MultiSync, watch <code>#ll_exact_status</code>, and if you see the best-effort / NOT frame-exact label, verify media is playing and run <b>Test Capture</b> on the <b>Config</b> tab. Logs: <code>&lt;mediadir&gt;/logs/plugin-fpp-ListenLive.log</code>.</p>
+<p>Press <b>F1</b> again to close this help. The detailed guide is also on the <b>Help</b> tab.</p>

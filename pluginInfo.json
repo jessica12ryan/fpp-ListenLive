@@ -2,21 +2,33 @@
 	"repoName": "fpp-ListenLive",
 	"name": "Listen Live Plugin for FPP",
 	"author": "jessica12ryan",
-	"description": "Listen to your show's live audio directly from within the FPP UI. Streams the FPP audio output to the browser via an HTML5 player with live status, volume control, and file-sync fallback. Works with PulseAudio, ALSA, or direct media file streaming.",
+	"description": "Listen to your show's audio in the FPP UI. Frame-exact playback uses FPP's MultiSync clock with short, scheduled audio chunks; if exact sync is unavailable it falls back to the live stream (PulseAudio, PipeWire or ALSA capture). Includes live status and volume control. Audio stays on your LAN.",
+	"minMemoryMB": 512,
+	"minCpuCores": 1,
 	"homeURL": "https://github.com/jessica12ryan/fpp-ListenLive",
 	"srcURL": "https://github.com/jessica12ryan/fpp-ListenLive.git",
 	"bugURL": "https://github.com/jessica12ryan/fpp-ListenLive/issues",
 	"iconURL": "https://raw.githubusercontent.com/jessica12ryan/fpp-ListenLive/main/icon.png",
 	"releaseNotesStyle": "gitHistory",
 	"privacy": {
-		"summary": "Streams your show's live audio to your browser on your home network so you can hear what the audience hears. Nothing is sent to the internet.",
+		"summary": "Captures FPP's live audio mix and streams it to your browser on your home LAN so you can hear what the audience hears. Nothing is uploaded or sent to the internet.",
 		"sends": [],
 		"collects": [],
-		"sensors": [],
+		"sensors": [
+			{
+				"type": "microphone",
+				"stored": false
+			}
+		],
 		"remoteAccess": "none",
-		"systemChanges": [],
+		"systemChanges": [
+			{
+				"kind": "core-settings",
+				"what": "Sets FPP's restartFlag on install/uninstall so fppd reloads the native sync plugin"
+			}
+		],
 		"closedCode": false,
-		"other": "Settings stay in config/settings.json and the log stays at logs/plugin-fpp-ListenLive.log until you clear them. Your browser keeps its own volume choice in localStorage."
+		"other": "Settings are stored by FPP in <mediadir>/config/plugin.fpp-ListenLive (not in the plugin directory); a legacy config/settings.json is migrated to <mediadir>/plugindata/fpp-ListenLive on install. Audio is served only to browsers on your LAN, and logs go to <mediadir>/logs/plugin-fpp-ListenLive.log. Your browser keeps its volume choice in localStorage."
 	},
 	"versions": [
 		{
@@ -45,6 +57,18 @@
 		},
 		{
 			"minFPPVersion": "10.0",
+			"maxFPPVersion": "0",
+			"branch": "main",
+			"sha": "",
+			"allowUpdates": 1,
+			"dependencies": {
+				"plugins": [],
+				"packages": ["ffmpeg"],
+				"scripts": []
+			}
+		},
+		{
+			"minFPPVersion": "11.0",
 			"maxFPPVersion": "0",
 			"branch": "main",
 			"sha": "",

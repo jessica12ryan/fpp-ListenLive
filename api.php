@@ -71,8 +71,7 @@ function llLoadSettings() {
         'channels' => 2,
         'alsa_device' => 'default',
         'pulse_source' => 'auto',
-        'volume' => 100,
-        'allow_remote' => 0
+        'volume' => 100
     ];
     // Preferred: FPP's plugin config store config/plugin.fpp-ListenLive (§3.5)
     if (llEnsureCommonLoaded()) {
@@ -82,7 +81,7 @@ function llLoadSettings() {
             $v = @ReadSettingFromFile($k, LL_PLUGIN_NAME);
             if ($v !== false && $v !== null && $v !== '') {
                 // Values are stored as strings; cast back to expected types
-                if (in_array($k, ['enabled','sample_rate','channels','volume','allow_remote'], true)) {
+                if (in_array($k, ['enabled','sample_rate','channels','volume'], true)) {
                     $loaded[$k] = is_numeric($v) ? (int)$v : $v;
                 } else {
                     $loaded[$k] = $v;
@@ -94,10 +93,26 @@ function llLoadSettings() {
             return array_merge($defaults, $loaded);
         }
     }
-    // Fallback: legacy JSON in plugin dir (pre-§3.5) — keep reading for migration
-    if (file_exists(LL_SETTINGS_FILE)) {
-        $s = json_decode(@file_get_contents(LL_SETTINGS_FILE), true);
-        if (is_array($s)) return array_merge($defaults, $s);
+    // Migration: the installer moves a legacy plugin-dir settings.json into
+    // plugindata. Import it into FPP's config store once, then it is canonical.
+    $migrated = llGetPlugindataDir() . '/settings.json';
+    $legacy = file_exists(LL_SETTINGS_FILE) ? LL_SETTINGS_FILE : $migrated;
+    if (file_exists($legacy)) {
+        $s = json_decode(@file_get_contents($legacy), true);
+        if (is_array($s)) {
+            $s = array_intersect_key($s, $defaults);
+            if (llEnsureCommonLoaded() && !empty($s)) {
+                foreach ($s as $k => $v) @WriteSettingToFile($k, (string)$v, LL_PLUGIN_NAME);
+                // Mark as imported so we don't rewrite the same values on every
+                // request; keep the original data in plugindata for reference.
+                if ($legacy === $migrated) @rename($migrated, $migrated . '.imported');
+            }
+            if ($legacy !== $migrated) {
+                @unlink($legacy);
+                if (file_exists($migrated)) @rename($migrated, $migrated . '.imported');
+            }
+            return array_merge($defaults, $s);
+        }
     }
     return $defaults;
 }
@@ -112,15 +127,12 @@ function llSaveSettings($s) {
             $res = @WriteSettingToFile($k, $str, LL_PLUGIN_NAME);
             if ($res === false) $ok = false;
         }
-        // Also keep legacy JSON in place for downgrade/migration (inside plugin dir — allowed)
-        if (!is_dir(LL_PLUGIN_DIR . '/config')) @mkdir(LL_PLUGIN_DIR . '/config', 0775, true);
-        @file_put_contents(LL_SETTINGS_FILE, json_encode($s, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
         return $ok;
     }
-    if (!is_dir(LL_PLUGIN_DIR . '/config')) {
-        @mkdir(LL_PLUGIN_DIR . '/config', 0775, true);
-    }
-    return @file_put_contents(LL_SETTINGS_FILE, json_encode($s, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+    // Common.php unavailable (e.g. host test harness): report failure rather than
+    // silently writing an unmanaged file inside the plugin directory (§3.5, §5).
+    llLog('Cannot save settings: FPP settings API unavailable');
+    return false;
 }
 
 function llFindFfmpeg() {
@@ -617,8 +629,8 @@ function llBuildFfmpegCommand($settings, $detection) {
     // FPP 10 uses system-wide PipeWire at /run/pipewire-fpp — use it explicitly
     if (is_dir('/run/pipewire-fpp') || file_exists('/run/pipewire-fpp/pipewire-0')) {
         $envPrefix = 'PIPEWIRE_REMOTE=/run/pipewire-fpp/pipewire-0 PIPEWIRE_RUNTIME_DIR=/run/pipewire-fpp ';
-        // Do NOT set XDG_RUNTIME_DIR to /run/pipewire-fpp when running as fpp via sudo - it causes "not owned by us"
-        // Only set XDG if running as root without sudo
+        // Set XDG_RUNTIME_DIR only when running as root (unusual: the web server
+        // normally runs as fpp). Never elevate privileges to capture audio.
         if (trim(@shell_exec('whoami 2>/dev/null') ?? '') === 'root') {
             $envPrefix .= 'XDG_RUNTIME_DIR=/run/pipewire-fpp ';
         }
@@ -651,7 +663,7 @@ function llBuildFfmpegCommand($settings, $detection) {
                 };
                 return $score($a) - $score($b);
             });
-            // Force fpp_group_default.monitor first if we know it exists (seen on this host) — use root for PipeWire
+            // Prefer the FPP group monitor: it carries the show mix plus background audio.
             $forced = ['fpp_group_default.monitor','fpp_alsa_audio.monitor','fpp_fx_g1_audio.monitor'];
             foreach ($forced as $f) {
                 if (in_array($f, $monitors)) {
@@ -668,7 +680,7 @@ function llBuildFfmpegCommand($settings, $detection) {
                 $attempts[] = [$envPrefix . 'pw-record - --rate 48000 --channels 2 2>/dev/null | ' . $ffmpeg . ' -hide_banner -loglevel error -f s16le -ar 48000 -ac 2 -i -', 'pw-record:default'];
             }
             foreach ($monitors as $src) {
-                // Use sudo (as root) for PipeWire monitors — fpp gets Permission denied on system socket
+                // Capture PipeWire monitors as the web user; no privilege escalation.
                 $attempts[] = [$sudoRootPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pulse -i ' . escapeshellarg($src), 'pipewire-pulse:' . $src];
                 if (!empty($detection['ffmpeg_pipewire'])) {
                     $attempts[] = [$sudoRootPrefix . $envPrefix . $ffmpeg . ' -hide_banner -loglevel error -f pipewire -i ' . escapeshellarg($src), 'pipewire:' . $src];
@@ -767,17 +779,15 @@ function getEndpointsfppListenLive() {
     $result[] = ['method' => 'GET',  'endpoint' => 'logs',        'callback' => 'llLogsEndpoint'];
     $result[] = ['method' => 'GET',  'endpoint' => 'sync',        'callback' => 'llSyncEndpoint'];
     $result[] = ['method' => 'GET',  'endpoint' => 'clock',       'callback' => 'llClockEndpoint'];
+    // Read-only update check only. Installation, reinstall, uninstall and fppd
+    // restarts are owned by FPP's Plugin Manager — never expose them over HTTP.
     $result[] = ['method' => 'GET',  'endpoint' => 'check-updates','callback' => 'llCheckUpdatesEndpoint'];
-    $result[] = ['method' => 'POST', 'endpoint' => 'update',      'callback' => 'llUpdateEndpoint'];
-    $result[] = ['method' => 'POST', 'endpoint' => 'reinstall',   'callback' => 'llReinstallEndpoint'];
-    $result[] = ['method' => 'POST', 'endpoint' => 'uninstall',   'callback' => 'llUninstallEndpoint'];
-    $result[] = ['method' => 'POST', 'endpoint' => 'restart-fppd','callback' => 'llRestartFPPDEndpoint'];
     return $result;
 }
 
 // Alias for case-insensitive loader (FPP normalizes plugin name; guard for case-insensitive PHP)
 if (!function_exists('getEndpointsfpplistenlive')) {
-    eval('function getEndpointsfpplistenlive(){ return getEndpointsfppListenLive(); }');
+    function getEndpointsfpplistenlive() { return getEndpointsfppListenLive(); }
 }
 
 function llStatusEndpoint() {
@@ -908,12 +918,13 @@ function llStreamEndpoint() {
         header('HTTP/1.1 503 Service Unavailable');
         header('Content-Type: application/json');
         llLog('Stream unavailable: ffmpeg not found');
-        return llJson(['success' => false, 'error' => 'FFmpeg not found. Install ffmpeg (sudo apt install ffmpeg).']);
+        return llJson(['success' => false, 'error' => 'FFmpeg not found. Install the declared ffmpeg dependency via the FPP Plugin Manager, or apt-get install ffmpeg.']);
     }
     $preFallback = llGetFallbackMedia();
-    if ($preFallback && (!empty($preFallback['path']) || !empty($preFallback['streamUrl']))) {
-        llLog('Stream: file-sync for ' . $preFallback['type'] . ' - ' . $preFallback['media']);
-        return llStreamFileSync(false);
+    $explicitFileMode = (($settings['source'] ?? 'auto') === 'file');
+    if ($explicitFileMode || ($preFallback && (!empty($preFallback['path']) || !empty($preFallback['streamUrl'])))) {
+        llLog('Stream: file-sync for ' . ($preFallback['type'] ?? 'explicit') . ' - ' . ($preFallback['media'] ?? 'current media'));
+        return llStreamFileSync($explicitFileMode);
     }
     // No file to sync — fall through to live capture probe below.
     // Probe live capture candidates WITHOUT sending headers yet — find first that yields data
@@ -1001,7 +1012,7 @@ function llStreamEndpoint() {
         header('Expires: 0');
         header('Accept-Ranges: none');
         header('Connection: close');
-        header('Access-Control-Allow-Origin: *');
+        // Same-origin only: the raw stream must not be readable by arbitrary sites.
 
         set_time_limit(0);
         ignore_user_abort(true);
@@ -1128,7 +1139,7 @@ function llStreamFileSync($isExplicitFileMode) {
             header('Cache-Control: no-cache, no-store, must-revalidate');
             header('Pragma: no-cache');
             header('Expires: 0');
-            header('Access-Control-Allow-Origin: *');
+            // Same-origin only: the raw stream must not be readable by arbitrary sites.
             set_time_limit(0);
             ignore_user_abort(true);
             @ini_set('zlib.output_compression', '0');
@@ -1167,7 +1178,7 @@ function llStreamFileSync($isExplicitFileMode) {
             header('Cache-Control: no-cache, no-store, must-revalidate');
             header('Pragma: no-cache');
             header('Expires: 0');
-            header('Access-Control-Allow-Origin: *');
+            // Same-origin only: the raw stream must not be readable by arbitrary sites.
             set_time_limit(0);
             ignore_user_abort(true);
             @ini_set('zlib.output_compression', '0');
@@ -1178,10 +1189,11 @@ function llStreamFileSync($isExplicitFileMode) {
             if (isset($fallback['bgStatus']['trackDuration']) && is_numeric($fallback['bgStatus']['trackDuration'])) $duration = (float)$fallback['bgStatus']['trackDuration'];
             elseif (isset($fallback['bgStatus']['duration']) && is_numeric($fallback['bgStatus']['duration'])) $duration = (float)$fallback['bgStatus']['duration'];
             $remaining = $duration > 0 ? max(0, $duration - $elapsed) : 0;
-            // -t counts from seekPos (elapsed - latency), not from elapsed,
-            // so cover remaining + latency or the tail is cut short.
+            // -t is an OUTPUT option: place it after -i. Before -i it limits the
+            // input read and can cut the tail. Count from seekPos (elapsed - latency),
+            // so cover remaining + latency.
             $durationArg = $remaining > 0 ? ' -t ' . escapeshellarg((string)($remaining + LLSyncTiming::SEEK_LATENCY_S + 0.5)) : '';
-            $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)$seekPos) . $durationArg . ' -i ' . escapeshellarg($path) . ' -codec:a libmp3lame -b:a 128k -write_xing 0 -id3v2_version 0 -f mp3 -flush_packets 1 -';
+            $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg((string)$seekPos) . ' -i ' . escapeshellarg($path) . $durationArg . ' -codec:a libmp3lame -b:a 128k -write_xing 0 -id3v2_version 0 -f mp3 -flush_packets 1 -';
             $handle = @popen($cmd . ' 2>/dev/null', 'r');
             if ($handle) {
                 while (!feof($handle) && connection_status() === CONNECTION_NORMAL) {
@@ -1233,7 +1245,7 @@ function llStreamFileSync($isExplicitFileMode) {
             if ($offset < $size) {
                 header('Content-Type: audio/mpeg');
                 header('Cache-Control: no-cache, no-store, must-revalidate');
-                header('Access-Control-Allow-Origin: *');
+                // Same-origin only: the raw stream must not be readable by arbitrary sites.
                 $fp = @fopen($path, 'rb');
                 if ($fp) {
                     @fseek($fp, $offset);
@@ -1258,7 +1270,7 @@ function llStreamFileSync($isExplicitFileMode) {
         // No seek or non-mp3: just send file
         header('Content-Type: ' . $mime);
         header('Cache-Control: no-cache, no-store, must-revalidate');
-        header('Access-Control-Allow-Origin: *');
+        // Same-origin only: the raw stream must not be readable by arbitrary sites.
         // Support range
         if (isset($_SERVER['HTTP_RANGE'])) {
             $size = filesize($path);
@@ -1367,7 +1379,8 @@ function llMediaStreamEndpoint() {
     if (isset($mimeMap[$ext])) $mime = $mimeMap[$ext];
 
     header('Content-Type: ' . $mime);
-    header('Content-Length: ' . filesize($path));
+    // Content-Length is set only for the raw byte path below. The seek/transcode
+    // and Range paths send different lengths (and remove this header).
     header('Accept-Ranges: bytes');
     header('Cache-Control: no-cache');
     // Support Range requests for seeking
@@ -1423,6 +1436,7 @@ function llMediaStreamEndpoint() {
             exit;
         }
     }
+    header('Content-Length: ' . filesize($path));
     readfile($path);
     exit;
 }
@@ -1437,7 +1451,7 @@ function llSaveEndpoint() {
         return llJson(['success' => false, 'error' => 'No data received']);
     }
     $existing = llLoadSettings();
-    $allowed = ['enabled','source','bitrate','sample_rate','channels','alsa_device','pulse_source','volume','allow_remote'];
+    $allowed = ['enabled','source','bitrate','sample_rate','channels','alsa_device','pulse_source','volume'];
     $clean = $existing;
     foreach ($allowed as $k) {
         if (array_key_exists($k, $data)) $clean[$k] = $data[$k];
@@ -1489,18 +1503,21 @@ function llTestEndpoint() {
     if ($detection['ffmpeg']) {
         $cmds = llBuildFfmpegCommand($settings, $detection);
         $probeOk = false;
+        $probeFile = llGetPlugindataDir() . '/capture-probe.bin';
         foreach (array_slice($cmds, 0, 2) as $pair) {
             [$cmd] = $pair;
-            // Limit to 1 second of capture
-            $probeCmd = $cmd . ' 2>&1 | head -c 1000';
-            // Actually run with timeout
-            $out = @shell_exec('timeout 2 ' . $cmd . ' 2>&1 | head -c 500; echo EXIT:$?');
-            if ($out && strpos($out, 'EXIT') !== false) {
-                // if we got binary data, it'll be non-empty
-                if (strlen($out) > 100) $probeOk = true;
+            // Write MP3 bytes to a file inside plugindata and inspect the actual
+            // bytes. Merging stderr into stdout made error text look like audio.
+            @shell_exec('timeout 2 /bin/sh -c ' . escapeshellarg($cmd) . ' > ' . escapeshellarg($probeFile) . ' 2>/dev/null');
+            $bytes = @file_get_contents($probeFile);
+            if (is_string($bytes) && strlen($bytes) > 512) {
+                $first = ord($bytes[0]);
+                $hasFrameSync = ($first === 0xFF && (ord($bytes[1]) & 0xE0) === 0xE0);
+                if ($hasFrameSync || substr($bytes, 0, 3) === 'ID3') $probeOk = true;
             }
         }
-        $results[] = ['check' => 'Audio capture probe (1s)', 'ok' => $probeOk ? 1 : 0, 'detail' => $probeOk ? 'Got audio data' : 'No data - check source selection'];
+        @unlink($probeFile);
+        $results[] = ['check' => 'Audio capture probe (1s)', 'ok' => $probeOk ? 1 : 0, 'detail' => $probeOk ? 'Got audio data' : 'No audio frames captured - check source selection'];
     }
     $allOk = true;
     foreach ($results as $r) if (!$r['ok']) $allOk = false;
@@ -1550,13 +1567,68 @@ function llLogsEndpoint() {
     return llJson(['success' => true, 'entries' => array_reverse($lines)]);
 }
 
+// Status-poll sync: used as a fallback for media/duration and as a complete
+// last resort when the native sync plugin is unavailable. Cached briefly: the
+// browser polls /sync frequently and fppd status is an HTTP round trip (§3.3).
+function llFppSyncFallback() {
+    static $cache = null, $cachedAt = 0.0;
+    $now = microtime(true);
+    if ($cache !== null && ($now - $cachedAt) < 0.25) return $cache;
+    $fppStatus = llGetFppStatus();
+    $fallback = llGetFallbackMedia();
+    $elapsed = LLSyncTiming::elapsedFromStatus($fppStatus, llGetBackgroundMusicStatus(), $fallback);
+    $dur = LLSyncTiming::durationFromStatus($fppStatus, null, $fallback);
+    $media = $fallback['media'] ?? $fppStatus['current_song'] ?? $fppStatus['current_sequence'] ?? '';
+    if (!is_string($media)) $media = '';
+    $cache = [
+        'has_media' => $media !== '' && $media !== 'false',
+        'media' => $media,
+        'seconds' => $elapsed,
+        'extrapolated_seconds' => $elapsed,
+        'duration' => $dur,
+        'fpp_milliseconds' => $fppStatus['milliseconds_elapsed'] ?? null,
+    ];
+    $cachedAt = $now;
+    return $cache;
+}
+
+// The native clock is authoritative for time, but it has no media duration and
+// no media state until MultiSync callbacks fire. Fill those gaps from fppd
+// status instead of letting an empty C++ payload shadow the working fallback.
+function llMergeSyncFallback(array $sync, array $fallback, $nowMono, $nowWall) {
+    $sync['server_monotonic_ms'] = $nowMono;
+    $sync['server_wall_ms'] = $nowWall;
+    if (!isset($sync['duration']) || !is_numeric($sync['duration'])) {
+        $sync['duration'] = $fallback['duration'];
+    }
+    $sync['has_duration'] = is_numeric($sync['duration']) && (float)$sync['duration'] > 0;
+    if (empty($sync['has_media']) || empty($sync['media'])) {
+        if ($fallback['has_media']) {
+            $sync['has_media'] = true;
+            $sync['media'] = $fallback['media'];
+            $sync['seconds'] = $fallback['seconds'];
+            // Use fppd's clock here — MultiSync has no position for this media.
+            $sync['extrapolated_seconds'] = $fallback['extrapolated_seconds'];
+            $sync['clock_source'] = 'fppd-status';
+            $sync['confidence'] = 'unresolved';
+        } else {
+            $sync['has_media'] = false;
+            $sync['media'] = '';
+            $sync['seconds'] = -1;
+            $sync['extrapolated_seconds'] = -1;
+        }
+    }
+    return $sync;
+}
+
 function llSyncEndpoint() {
     // Never 503 here: sync precision degrades (c++ -> file -> status poll)
-    // instead of failing. JS polls this every 200ms; a 503 breaks exact sync.
-    // Try C++ plugin's exact sync first (monotonic, frame-exact), then fallback to file/status (§5 — plugindata, not /tmp)
+    // instead of failing. JS polls this while playing; a 503 breaks exact sync.
     $syncFile = llGetPlugindataDir() . '/ll_sync.json';
     $nowMono = LLSyncTiming::monotonicMs();
     $nowWall = LLSyncTiming::wallClockMs();
+    $fallback = llFppSyncFallback();
+
     // Try C++ plugin API via Apache proxy — stable surface (§3.3), most precise
     $cppSync = null;
     if (function_exists('curl_init')) {
@@ -1570,53 +1642,44 @@ function llSyncEndpoint() {
             $cppSync = json_decode($tmp, true);
         }
     }
-    if (is_array($cppSync) && isset($cppSync['media'])) {
-        // C++ authoritative — add server now for RTT calc
-        $cppSync['server_monotonic_ms'] = $nowMono;
-        $cppSync['server_wall_ms'] = $nowWall;
-        $cppSync['source'] = 'c++';
-        return llJson($cppSync);
+    if (is_array($cppSync)) {
+        $sync = llMergeSyncFallback($cppSync, $fallback, $nowMono, $nowWall);
+        $sync['source'] = 'c++';
+        return llJson($sync);
     }
-    // Fallback: file written by C++ (if fppd API not reachable) — plugindata first, then legacy /tmp for migration
-    foreach ([$syncFile, '/tmp/ll_sync.json'] as $sf) {
-        if (file_exists($sf)) {
-            $j = @json_decode(@file_get_contents($sf), true);
-            if (is_array($j) && isset($j['media'])) {
-                $j['server_monotonic_ms'] = $nowMono;
-                $j['server_wall_ms'] = $nowWall;
-                $j['source'] = ($sf === $syncFile) ? 'file' : 'file-legacy';
-                if (isset($j['monotonic_ms'], $j['seconds']) && is_numeric($j['monotonic_ms']) && is_numeric($j['seconds']) && $j['seconds'] >= 0) {
-                    $delta = ($nowMono - (float)$j['monotonic_ms']) / 1000.0;
-                    if ($delta >= 0 && $delta < 2.0) {
-                        $j['extrapolated_seconds'] = (float)$j['seconds'] + $delta;
-                        $j['extrapolated'] = true;
-                    }
+    // File written by the C++ plugin (plugindata only — never /tmp).
+    if (is_readable($syncFile)) {
+        $j = @json_decode(@file_get_contents($syncFile), true);
+        if (is_array($j) && array_key_exists('media', $j)) {
+            if (isset($j['monotonic_ms'], $j['seconds']) && is_numeric($j['monotonic_ms']) && is_numeric($j['seconds']) && $j['seconds'] >= 0) {
+                $delta = ($nowMono - (float)$j['monotonic_ms']) / 1000.0;
+                if ($delta >= 0 && $delta < 2.0) {
+                    $j['extrapolated_seconds'] = (float)$j['seconds'] + $delta;
+                    $j['extrapolated'] = true;
                 }
-                return llJson($j);
             }
+            $sync = llMergeSyncFallback($j, $fallback, $nowMono, $nowWall);
+            $sync['source'] = 'file';
+            return llJson($sync);
         }
     }
     // Final fallback: status poll (int seconds) — not frame-exact
-    $fppStatus = llGetFppStatus();
-    $fallback = llGetFallbackMedia();
-    $elapsed = LLSyncTiming::elapsedFromStatus($fppStatus, llGetBackgroundMusicStatus(), $fallback);
-    $dur = LLSyncTiming::durationFromStatus($fppStatus, null, $fallback);
-    $media = $fallback['media'] ?? $fppStatus['current_song'] ?? $fppStatus['current_sequence'] ?? '';
     return llJson([
-        'has_media' => $media !== '' && $media !== 'false',
-        'media' => $media,
-        'seconds' => $elapsed,
-        'extrapolated_seconds' => $elapsed,
-        'frame' => $elapsed >= 0 ? (int)($elapsed * 44100) : -1,
+        'has_media' => $fallback['has_media'],
+        'media' => $fallback['media'],
+        'seconds' => $fallback['seconds'],
+        'extrapolated_seconds' => $fallback['extrapolated_seconds'],
+        'frame' => $fallback['extrapolated_seconds'] >= 0 ? (int)($fallback['extrapolated_seconds'] * 44100) : -1,
         'monotonic_ms' => $nowMono,
         'wall_ms' => $nowWall,
         'epoch_ms' => $nowWall - $nowMono, // approx
         'server_monotonic_ms' => $nowMono,
         'server_wall_ms' => $nowWall,
-        'confidence' => $media !== '' ? 'exact' : 'unresolved',
+        'confidence' => $fallback['has_media'] ? 'unresolved' : 'unresolved',
         'source' => 'fallback',
-        'duration' => $dur,
-        'fpp_milliseconds' => $fppStatus['milliseconds_elapsed'] ?? null,
+        'duration' => $fallback['duration'],
+        'has_duration' => is_numeric($fallback['duration']) && (float)$fallback['duration'] > 0,
+        'fpp_milliseconds' => $fallback['fpp_milliseconds'],
     ]);
 }
 
@@ -1655,73 +1718,6 @@ function llCheckUpdatesEndpoint() {
     }
     $updateAvailable = !empty($localSha) && !empty($remoteSha) && $localSha !== $remoteSha;
     return llJson(['updateAvailable' => $updateAvailable, 'localSha' => !empty($localSha) ? substr($localSha,0,7) : 'unknown', 'remoteSha' => !empty($remoteSha) ? substr($remoteSha,0,7) : 'unknown']);
-}
-
-function llUpdateEndpoint() {
-    $pluginDir = LL_PLUGIN_DIR;
-    $backupDir = llGetPlugindataDir() . '/tmp_update_backup';
-    @mkdir($backupDir, 0775, true);
-    if (file_exists(LL_SETTINGS_FILE)) @copy(LL_SETTINGS_FILE, $backupDir . '/settings.json');
-    // Also backup FPP plugin config store
-    $pluginConfigFile = '';
-    if (isset($GLOBALS['settings']['configDirectory'])) $pluginConfigFile = rtrim($GLOBALS['settings']['configDirectory'], '/') . '/plugin.' . LL_PLUGIN_NAME;
-    if ($pluginConfigFile !== '' && file_exists($pluginConfigFile)) @copy($pluginConfigFile, $backupDir . '/plugin.' . LL_PLUGIN_NAME);
-    if (is_dir($pluginDir . '/.git')) {
-        exec('git -C ' . escapeshellarg($pluginDir) . ' fetch origin 2>&1');
-        exec('git -C ' . escapeshellarg($pluginDir) . ' checkout -- . 2>&1');
-        exec('git -C ' . escapeshellarg($pluginDir) . ' clean -fd 2>&1');
-        exec('git -C ' . escapeshellarg($pluginDir) . ' reset --hard origin/main 2>&1');
-    }
-    if (file_exists($backupDir . '/settings.json')) {
-        @mkdir(dirname(LL_SETTINGS_FILE), 0777, true);
-        @copy($backupDir . '/settings.json', LL_SETTINGS_FILE);
-    }
-    if (file_exists($backupDir . '/plugin.' . LL_PLUGIN_NAME) && isset($pluginConfigFile) && $pluginConfigFile !== '') {
-        @copy($backupDir . '/plugin.' . LL_PLUGIN_NAME, $pluginConfigFile);
-    }
-    exec('rm -rf ' . escapeshellarg($backupDir));
-    @chmod(LL_PLUGIN_DIR . '/config', 0775);
-    foreach (glob(LL_PLUGIN_DIR . '/config/*') as $f) @chmod($f, 0664);
-    $infoFile = $pluginDir . '/pluginInfo.json';
-    if (file_exists($infoFile)) {
-        $info = json_decode(file_get_contents($infoFile), true);
-        if ($info && isset($info['versions'])) {
-            $sha = trim(@shell_exec('git -C ' . escapeshellarg($pluginDir) . ' rev-parse HEAD 2>/dev/null') ?? '');
-            if (!empty($sha)) {
-                foreach ($info['versions'] as &$v) $v['sha'] = $sha;
-                file_put_contents($infoFile, json_encode($info, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
-            }
-        }
-    }
-    $opts = ['http' => ['method' => 'PUT', 'header' => 'Content-Type: application/json', 'content' => '1']];
-    @file_get_contents('http://localhost/api/settings/restartFlag', false, stream_context_create($opts));
-    llLog('Plugin updated');
-    return llJson(['success' => true, 'message' => 'Plugin updated']);
-}
-
-function llReinstallEndpoint() {
-    return llUpdateEndpoint();
-}
-
-function llUninstallEndpoint() {
-    $pluginDir = LL_PLUGIN_DIR;
-    $it = new RecursiveDirectoryIterator($pluginDir, RecursiveDirectoryIterator::SKIP_DOTS);
-    $files = new RecursiveIteratorIterator($it, RecursiveIteratorIterator::CHILD_FIRST);
-    foreach ($files as $file) {
-        if ($file->isDir()) @rmdir($file->getRealPath()); else @unlink($file->getRealPath());
-    }
-    @rmdir($pluginDir);
-    $opts = ['http' => ['method' => 'PUT', 'header' => 'Content-Type: application/json', 'content' => '1']];
-    @file_get_contents('http://localhost/api/settings/restartFlag', false, stream_context_create($opts));
-    llLog('Plugin uninstalled');
-    return llJson(['success' => true, 'message' => 'Plugin removed']);
-}
-
-function llRestartFPPDEndpoint() {
-    $opts = ['http' => ['method' => 'PUT', 'header' => 'Content-Type: application/json', 'content' => '1']];
-    $result = @file_get_contents('http://localhost/api/settings/restartFlag', false, stream_context_create($opts));
-    if ($result === false) return llJson(['success' => false, 'error' => 'Could not set restart flag']);
-    return llJson(['success' => true, 'message' => 'FPPD restart flag set']);
 }
 
 // Helpers that do NOT collide with FPP's reserved names (PluginApiFunctionConflicts scans for `function json`/`function param`)

@@ -10,5 +10,5 @@
  */
 ?>
 <div class="ll-footer mt-3 pt-2 text-muted small border-top" style="text-align:center;">
-    Copyright &copy; 2026 jessica12ryan. Licensed under the MIT License.<br>FPP is &copy; Falcon Christmas. This plugin is an independent integration and is not affiliated with or endorsed by the Falcon Christmas project.
+    Copyright &copy; 2026 jessica12ryan. Licensed under the MIT License.<br>FPP is &copy; Falcon Christmas. This plugin is an independent integration and is not affiliated with or endorsed by the Falcon Christmas project.<br>Audio stays on your LAN — nothing is sent off-box or stored. No telemetry, advertising, or donations.
 </div>
