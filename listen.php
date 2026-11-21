@@ -69,7 +69,7 @@ $showDevTab = $uiLevel >= 3;
                     <span></span><span></span><span></span><span></span><span></span>
                 </div>
 
-                <audio id="ll_audio" controls preload="none" playsinline></audio>
+                <audio id="ll_audio" controls autoplay preload="none" playsinline></audio>
                 <div id="ll_timing" class="ll-timing" style="max-width:560px;margin:8px auto 4px auto;text-align:center;display:none;">
                     <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--bs-secondary-color);margin-bottom:4px;">
                         <span id="ll_time_elapsed">00:00</span>
@@ -296,6 +296,7 @@ var llExactAudio = {
     driftCount: 0,
     needPrime: true,
     lastFallbackAt: 0,
+    pendingCutover: false,
     scheduled: [],
     generation: 0,
     fetching: 0,
@@ -400,6 +401,7 @@ var llExactAudio = {
         this.transitionUntil = 0;
         this.driftCount = 0;
         this.needPrime = true;
+        this.pendingCutover = false;
         this.scheduled = [];
         this.generation++;
         llMasterClock.reset();
@@ -439,6 +441,7 @@ var llExactAudio = {
         this.active = false;
         this.audible = false;
         this.anchored = false;
+        this.pendingCutover = false;
         this.mediaName = null;
         this.mediaKey = null;
         this.endedState = false;
@@ -481,6 +484,28 @@ var llExactAudio = {
     onSync: function(d) {
         var t = (d && d.transport) ? d.transport : null;
         var inTransition = performance.now() < this.transitionUntil;
+        var key = (t && t.media_key) ? t.media_key : (d ? d.media : '');
+
+        // A new track is known, but the native clock has not settled yet. Keep
+        // the native stream audible and wait for the gate before priming; this
+        // avoids both the silent fetch window and a mid-block clock jump.
+        if (this.pendingCutover) {
+            if (!d || !d.has_media || !d.media) {
+                this.status('cutover • waiting for media');
+                return;
+            }
+            this.lastSync = d;
+            this.transitionUntil = performance.now() + 3000;
+            if (d && d.clock_reset_pending) {
+                this.status('cutover • clock settling');
+                return;
+            }
+            this.pendingCutover = false;
+            this.hardResync(llMasterClock.masterNow(), 'new track', this.targetLatency);
+            this.fill();
+            return;
+        }
+
         if (t && t.available && t.playing === false) {
             // Confirm over >=1 s (4 polls). A gap between playlist items must
             // never look like the end of the show, especially in a cutover.
@@ -522,9 +547,18 @@ var llExactAudio = {
             this.mediaName = d.media;
             this.transitionUntil = performance.now() + 3000;
             this.driftCount = 0;
-            // The server clamps master_seconds to fppd elapsed until the native
-            // clock restarts, so this seek cannot land past the new file's EOF.
-            this.hardResync(llMasterClock.masterNow(), 'new track', this.cutoverLead());
+            // Bridge the switch with the native stream, then stop scheduling
+            // old content. armAudible() will mute native again when the first
+            // exact chunk actually sounds.
+            this.audible = false;
+            llPlayer.syncNativeMute();
+            this.clearQueue(true);
+            if (d.clock_reset_pending) {
+                this.pendingCutover = true;
+                this.status('cutover • waiting for clock');
+                return;
+            }
+            this.hardResync(llMasterClock.masterNow(), 'new track', this.targetLatency);
             this.fill();
         }
     },
@@ -775,6 +809,7 @@ var llExactAudio = {
 
     fill: function() {
         if (!this.active || !this.ctx || !this.anchored || this.fallbackActive) return;
+        if (this.pendingCutover) return;
         if (this.needPrime) { this.primeFill(); return; }
         // Watchdog first: a hung fetch must not stall the scheduler forever.
         if (this.fetching && this.fetchStartedAt && (performance.now() - this.fetchStartedAt) > 4000) {
@@ -902,6 +937,7 @@ var llPlayer = {
     autoPlayBlocked: false,
     gestureRetryAdded: false,
     lastGestureStart: 0,
+    autoplayPolicy: '',
     // Deadline-at-read: monotonic timestamp of last media change for confidence
     lastMediaAnnouncedAtMono: null,
     lastElapsedHalf: null,
@@ -1218,6 +1254,20 @@ var llPlayer = {
         if (llExactAudio.useAudio && window.AudioContext) {
             try { llExactAudio.start(); } catch(e) { console.warn('exact autoStart failed', e); }
         }
+        // Record why a browser might refuse: an FPP iframe without
+        // allow="autoplay" or a page with no prior user activation.
+        var activated = navigator.userActivation ? navigator.userActivation.hasBeenActive : null;
+        var allowed = null;
+        try {
+            if (document.permissionsPolicy && document.permissionsPolicy.allowsFeature) {
+                allowed = document.permissionsPolicy.allowsFeature('autoplay');
+            }
+        } catch(e) {}
+        llPlayer.autoplayPolicy = 'activation=' + (activated === null ? '?' : activated) +
+            ' autoplay=' + (allowed === null ? '?' : allowed);
+        if (llExactAudio.ctx && llExactAudio.ctx.state === 'suspended') {
+            try { var r = llExactAudio.ctx.resume(); if (r && r.catch) r.catch(function(){}); } catch(e) {}
+        }
         if (!a.src || a.src === window.location.href) {
             a.src = llPlayer.buildUrl();
             a.load();
@@ -1257,6 +1307,8 @@ var llPlayer = {
         var msg = blocked
             ? 'Audio is blocked until you tap Play (browser autoplay policy).'
             : 'Playback blocked: ' + (e && e.message ? e.message : 'unknown error') + ' — click Play again.';
+        if (llPlayer.autoplayPolicy) msg += ' [' + llPlayer.autoplayPolicy + ']';
+        console.warn('ListenLive: autoplay blocked', e && e.name ? e.name : 'unknown', llPlayer.autoplayPolicy);
         $('#ll_status_text').html('<span class="text-danger">' + escHtml(msg) + '</span>');
         $('#ll_badge').removeClass('ll-badge-live ll-badge-warn').addClass('ll-badge-idle').text('Tap Play');
         $('#ll_btn_play').val('▶ Play');
