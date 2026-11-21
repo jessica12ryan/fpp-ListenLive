@@ -96,6 +96,7 @@ $showDevTab = $uiLevel >= 3;
                 <div style="margin:8px auto;max-width:560px;text-align:center;">
                     <label style="font-size:12px;color:var(--bs-secondary-color);"><input type="checkbox" id="ll_exact_toggle" onchange="llExactAudio.toggleAudio(this.checked);" style="vertical-align:middle;margin-right:4px;"> Exact frame sync (Web Audio, versatile)</label>
                     <span id="ll_exact_status" style="font-size:11px;color:var(--bs-secondary-color);margin-left:8px;"></span>
+                    <button type="button" id="ll_enable_audio" class="buttons" style="display:none;padding:2px 8px;margin-left:6px;font-size:11px;" onclick="llPlayer.enableAudioFromGesture();">Tap to start audio</button>
                     <div id="ll_exact_info" class="alert alert-info py-1 px-2 small" style="font-size:11px;margin-top:6px;display:none;" role="alert"></div>
                 </div>
                 <div class="ll-status-grid" id="ll_details">
@@ -276,11 +277,13 @@ var llExactAudio = {
     chunkSeconds: 0.5,
     blockSeconds: 4.0,
     targetLatency: 0.5,
-    prefetchDepth: 2.0,
+    prefetchDepth: 5.0,
     nextSeek: -1,
     nextWhen: 0,
     transitionUntil: 0,
     driftCount: 0,
+    needPrime: true,
+    lastFallbackAt: 0,
     scheduled: [],
     generation: 0,
     fetching: 0,
@@ -332,6 +335,7 @@ var llExactAudio = {
         } catch (e) {}
         $('#ll_exact_toggle').prop('checked', this.useAudio);
         if (this.useAudio) {
+            this.lastFallbackAt = 0;
             try { llExact.useExact = false; llExact.stop(); } catch (e) {}
             if (llPlayer.isPlaying) this.start();
         } else {
@@ -351,6 +355,9 @@ var llExactAudio = {
             if (this.ctx.state === 'suspended') { try { this.ctx.resume(); } catch (e) {} }
             return;
         }
+        // After a fallback, the muted native stream's 'playing' event must not
+        // immediately restart the exact engine and create a 2-3 s loop.
+        if (this.lastFallbackAt && (Date.now() - this.lastFallbackAt) < 10000) return;
         this.stop();
         this.startedAt = Date.now();
         try { this.ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' }); }
@@ -380,6 +387,7 @@ var llExactAudio = {
         this.nextWhen = 0;
         this.transitionUntil = 0;
         this.driftCount = 0;
+        this.needPrime = true;
         this.scheduled = [];
         this.generation++;
         llMasterClock.reset();
@@ -429,6 +437,7 @@ var llExactAudio = {
 
     fallBackToNative: function(reason) {
         if (this.fallbackActive) return;
+        this.lastFallbackAt = Date.now();
         this.stop();
         this.fallbackActive = true;
         llPlayer.resumeNative();
@@ -436,6 +445,13 @@ var llExactAudio = {
         $('#ll_exact_info').text('Web Audio could not supply audio (' + (reason || 'no chunks') + '). The live stream is playing instead — it is not frame-locked to MultiSync.').show();
         setTimeout(function() { $('#ll_exact_info').fadeOut(6000); }, 6000);
         console.warn('ListenLive: Web Audio fallback to native stream:', reason || 'no chunks');
+        var self = this;
+        setTimeout(function() {
+            if (llPlayer.isPlaying && self.fallbackActive) {
+                self.fallbackActive = false;
+                self.start();
+            }
+        }, 10500);
     },
 
     pollSync: function() {
@@ -521,6 +537,7 @@ var llExactAudio = {
         this.drift = 0;
         this.driftCount = 0;
         this.driftHist = [];
+        this.needPrime = true;
     },
 
     activeSource: function(now) {
@@ -582,6 +599,7 @@ var llExactAudio = {
         this.drift = 0;
         this.driftCount = 0;
         this.driftHist = [];
+        this.needPrime = true;
         this.status('resync ' + reason);
     },
 
@@ -621,8 +639,125 @@ var llExactAudio = {
         if (typeof llPlayer !== 'undefined' && llPlayer.onExactEnded) llPlayer.onExactEnded(reason);
     },
 
+    // Keep the native stream audible until the first scheduled sample actually
+    // sounds. Muting at schedule time opens a targetLatency-sized hole.
+    armAudible: function(firstWhen) {
+        if (this.audible || !this.ctx) return;
+        var self = this, gen = this.generation;
+        var delay = Math.max(0, (firstWhen - this.ctx.currentTime) * 1000);
+        setTimeout(function() {
+            if (!self.ctx || gen !== self.generation || self.audible) return;
+            self.audible = true;
+            llPlayer.syncNativeMute();
+        }, delay);
+    },
+
+    // Slice a decoded PCM block into contiguous AudioBuffers. Kept as a method
+    // (not an inline promise callback) so `this` is always the exact engine.
+    scheduleBlock: function(pcm, sr, ch, baseWhen, baseSeek) {
+        var totalFrames = Math.floor(pcm.length / ch);
+        if (totalFrames < 256) throw new Error('empty PCM chunk');
+        var stepFrames = Math.max(1, Math.floor(this.chunkSeconds * sr));
+        var now2 = this.ctx.currentTime;
+        var frame = 0, cursorWhen = baseWhen, cursorSeek = baseSeek;
+        var scheduledAny = false, firstWhen = -1;
+        while (frame < totalFrames) {
+            var frames = Math.min(stepFrames, totalFrames - frame);
+            var dur = frames / sr;
+            var lateSlice = cursorWhen < now2 + 0.005;
+            frame += frames;
+            cursorWhen += dur;
+            cursorSeek += dur;
+            if (lateSlice) { this.late++; continue; }
+            var ab = this.ctx.createBuffer(ch, frames, sr);
+            for (var c = 0; c < ch; c++) {
+                var out = ab.getChannelData(c);
+                for (var i = 0; i < frames; i++) out[i] = pcm[(frame - frames + i) * ch + c] / 32768;
+            }
+            var src = this.ctx.createBufferSource();
+            src.buffer = ab;
+            var g = this.ctx.createGain();
+            g.gain.value = 1;
+            src.connect(g);
+            g.connect(this.gain || this.ctx.destination);
+            var startAt = cursorWhen - dur;
+            src.start(startAt);
+            this.scheduled.push({ when: startAt, end: cursorWhen, seek: cursorSeek - dur, src: src, gain: g });
+            if (firstWhen < 0) firstWhen = startAt;
+            scheduledAny = true;
+        }
+        if (scheduledAny) {
+            this.nextSeek = cursorSeek;
+            this.nextWhen = cursorWhen;
+            this.armAudible(firstWhen);
+        }
+        return scheduledAny;
+    },
+
+    // First block (or recovery from an empty queue): do not compute a deadline
+    // before the fetch. Anchor the block to the master AFTER it arrives so a
+    // slow RTT cannot make it late. Steady-state offset stays targetLatency.
+    primeFill: function() {
+        if (!this.active || !this.ctx || !this.anchored || this.fallbackActive) return;
+        if (this.fetching === this.generation) return;
+        var self = this;
+        if (this.ctx.state === 'suspended') { try { this.ctx.resume(); } catch (e) {} }
+        var d = this.lastSync;
+        if (!d || !d.media) { return setTimeout(function() { self.fill(); }, 200); }
+        var m = llMasterClock.masterNow();
+        if (m < 0 && d && typeof d.master_seconds === 'number') m = d.master_seconds;
+        if (m < 0) return setTimeout(function() { self.fill(); }, 250);
+        var seek = Math.max(0, Math.round((m + this.targetLatency) * 1000) / 1000);
+        var duration = (d.has_duration && typeof d.duration === 'number') ? d.duration : 0;
+        var want = this.blockSeconds;
+        if (duration > 0 && seek + want > duration) want = Math.max(0.02, duration - seek + 0.03);
+        var gen = this.generation;
+        this.fetching = gen;
+        this.fetchStartedAt = performance.now();
+        var url = 'api/plugin/fpp-ListenLive/media?file=' + encodeURIComponent(d.media) +
+                  '&seek=' + seek + '&duration=' + want + '&format=pcm';
+        this.status('prime');
+        fetch(url, { cache: 'no-store' }).then(function(resp) {
+            if (!resp.ok) throw new Error('media fetch ' + resp.status);
+            var info = {
+                sr: parseInt(resp.headers.get('X-Sample-Rate'), 10) || 44100,
+                ch: parseInt(resp.headers.get('X-Channels'), 10) || 2
+            };
+            return resp.arrayBuffer().then(function(buf) { return { buf: buf, info: info }; });
+        }).then(function(res) {
+            if (gen !== self.generation || !self.ctx) {
+                if (self.fetching === gen) self.fetching = 0;
+                return;
+            }
+            var sr = res.info.sr, ch = res.info.ch;
+            if (ch < 1 || ch > 2 || sr < 8000) throw new Error('bad PCM headers');
+            // Anchor at read time, not at fetch-start time.
+            var m2 = llMasterClock.masterNow();
+            if (m2 < 0) m2 = m;
+            self.clearQueue(true);
+            var startSeek = m2 + self.targetLatency;
+            var startWhen = self.ctx.currentTime + self.targetLatency;
+            if (!self.scheduleBlock(new Int16Array(res.buf), sr, ch, startWhen, startSeek)) {
+                throw new Error('prime returned no slices');
+            }
+            self.fetching = 0;
+            self.failCount = 0;
+            self.needPrime = false;
+            self.status();
+            setTimeout(function() { self.fill(); }, 30);
+        }).catch(function(e) {
+            if (self.fetching === gen) self.fetching = 0;
+            if (gen !== self.generation || !self.ctx) return;
+            self.failCount++;
+            console.warn('ListenLive: PCM prime failed', e && e.message ? e.message : e);
+            if (self.failCount >= 5) { self.fallBackToNative(e && e.message ? e.message : 'prime failed'); return; }
+            setTimeout(function() { self.fill(); }, 300 * self.failCount);
+        });
+    },
+
     fill: function() {
         if (!this.active || !this.ctx || !this.anchored || this.fallbackActive) return;
+        if (this.needPrime) { this.primeFill(); return; }
         // Watchdog first: a hung fetch must not stall the scheduler forever.
         if (this.fetching && this.fetchStartedAt && (performance.now() - this.fetchStartedAt) > 4000) {
             this.generation++;
@@ -675,63 +810,19 @@ var llExactAudio = {
             var sr = res.info.sr, ch = res.info.ch;
             if (ch < 1 || ch > 2 || sr < 8000) throw new Error('bad PCM headers');
             var pcm = new Int16Array(res.buf);
-            var totalFrames = Math.floor(pcm.length / ch);
-            if (totalFrames < 256) throw new Error('empty PCM chunk');
-            var stepFrames = Math.max(1, Math.floor(this.chunkSeconds * sr));
             var now2 = self.ctx.currentTime;
-            var frame = 0, cursorWhen = when, cursorSeek = seek, scheduledAny = false;
-            while (frame < totalFrames) {
-                var frames = Math.min(stepFrames, totalFrames - frame);
-                var dur = frames / sr;
-                // If a slice is already in the past, advance content time with
-                // it instead of playing stale audio. The next slice stays
-                // sample-contiguous with the master clock.
-                var lateSlice = cursorWhen < now2 + 0.005;
-                frame += frames;
-                cursorWhen += dur;
-                cursorSeek += dur;
-                if (lateSlice) { self.late++; continue; }
-                var ab = self.ctx.createBuffer(ch, frames, sr);
-                for (var c = 0; c < ch; c++) {
-                    var out = ab.getChannelData(c);
-                    for (var i = 0; i < frames; i++) out[i] = pcm[(frame - frames + i) * ch + c] / 32768;
-                }
-                var src = self.ctx.createBufferSource();
-                src.buffer = ab;
-                var g = self.ctx.createGain();
-                g.gain.value = 1;
-                src.connect(g);
-                g.connect(self.gain || self.ctx.destination);
-                src.start(cursorWhen - dur);
-                self.scheduled.push({ when: cursorWhen - dur, end: cursorWhen, seek: cursorSeek - dur, src: src, gain: g });
-                scheduledAny = true;
-            }
-            if (!scheduledAny) {
-                // Whole block arrived too late. Re-anchor the frontier to the
-                // master starting when the audible chunk ends; never tear down
-                // the existing queue.
+            if (!self.scheduleBlock(pcm, sr, ch, when, seek)) {
+                // Whole block arrived too late. Re-prime from the current
+                // master rather than playing stale content or falling back.
                 self.fetching = 0;
                 self.late++;
-                var active = self.activeSource(now2);
-                var startAt = active ? Math.max(now2 + 0.02, active.end) : now2 + 0.05;
-                var m = llMasterClock.masterNow();
-                if (m >= 0) {
-                    self.nextSeek = m + (startAt - now2);
-                    self.nextWhen = startAt;
-                    self.driftHist = [];
-                    self.status('late +' + ((now2 - when) * 1000).toFixed(0) + 'ms');
-                }
+                self.needPrime = true;
+                self.status('late +' + ((now2 - when) * 1000).toFixed(0) + 'ms');
                 setTimeout(function() { self.fill(); }, 10);
                 return;
             }
-            self.nextSeek = cursorSeek;
-            self.nextWhen = cursorWhen;
             self.fetching = 0;
             self.failCount = 0;
-            if (!self.audible) {
-                self.audible = true;
-                llPlayer.syncNativeMute();
-            }
             self.status();
             setTimeout(function() { self.fill(); }, 30);
         }).catch(function(e) {
@@ -739,7 +830,8 @@ var llExactAudio = {
             if (gen !== self.generation) return;
             self.failCount++;
             console.warn('ListenLive: PCM chunk failed', e && e.message ? e.message : e);
-            if (self.failCount >= 3) { self.fallBackToNative(e && e.message ? e.message : 'chunk failed'); return; }
+            if (self.failCount >= 5) { self.fallBackToNative(e && e.message ? e.message : 'chunk failed'); return; }
+            self.needPrime = true;
             setTimeout(function() { self.fill(); }, 300);
         });
     },
@@ -824,12 +916,11 @@ var llPlayer = {
         } catch(e) {}
     },
     setUserPaused: function(paused) {
+        // In-memory only: an explicit Pause suppresses polling-driven restarts
+        // while this page is open, but must not block auto-play on a later
+        // page load.
         llPlayer.userPaused = !!paused;
         if (paused) llPlayer.autoPlayBlocked = false;
-        try {
-            if (paused) sessionStorage.setItem('fpp-ListenLive-userPaused', '1');
-            else sessionStorage.removeItem('fpp-ListenLive-userPaused');
-        } catch(e) {}
     },
     // FPP reports the show ended; stop the transport UI but leave the exact
     // engine polling so the next playlist starts without a click.
@@ -853,9 +944,9 @@ var llPlayer = {
         // Mute is never persisted: every page load starts audible.
         llPlayer.isMuted = false;
         llPlayer.audio.muted = false;
-        // An explicit Pause is remembered for this tab so status polling does
-        // not immediately restart playback behind the user's back.
-        try { llPlayer.userPaused = sessionStorage.getItem('fpp-ListenLive-userPaused') === '1'; } catch(e) {}
+        // Autoplay: a persisted flag from an earlier page load must never
+        // suppress the FPP-status-driven start.
+        llPlayer.userPaused = false;
         // Load saved volume
         var savedVol = localStorage.getItem('fpp-ListenLive-volume');
         if (savedVol !== null) {
@@ -881,6 +972,7 @@ var llPlayer = {
             llPlayer.reconnecting = false;
             clearTimeout(llPlayer.reconnectTimer);
             llPlayer.setUserPaused(false);
+            $('#ll_enable_audio').hide();
             llPlayer.reconnectAttempts = 0;
             llPlayer.trackChangePending = false;
             llPlayer.initialConnect = false;
@@ -1104,6 +1196,17 @@ var llPlayer = {
         $('#ll_badge').removeClass('ll-badge-live ll-badge-warn').addClass('ll-badge-idle').text('Tap Play');
         $('#ll_btn_play').val('▶ Play');
         $('#ll_btn_play').attr('onclick', 'llPlayer.play();');
+        $('#ll_enable_audio').show();
+    },
+
+    enableAudioFromGesture: function() {
+        $('#ll_enable_audio').hide();
+        llPlayer.autoPlayBlocked = false;
+        llPlayer.setUserPaused(false);
+        if (llExactAudio.ctx && llExactAudio.ctx.state === 'suspended') {
+            try { llExactAudio.ctx.resume(); } catch(e) {}
+        }
+        llPlayer.play();
     },
 
     pause: function() {

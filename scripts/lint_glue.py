@@ -105,6 +105,18 @@ if "IDLE_SETTLE_MS" not in timing or "250" not in timing:
 if "Stream probe no data" not in api or "errCount" not in api:
     fail("api.php does not throttle probe log spam — should mirror PulseMesh m_sendErrorCount>10 suppress")
 
+# 7b. Promise callbacks are unbound: `this` inside them is window/undefined,
+#     not llExactAudio. The block slicer must be a method called on `self`.
+import re as _re
+_in_then = False
+for _ln in listen.splitlines():
+    if '.then(function' in _ln:
+        _in_then = True
+    if _in_then and _re.search(r'\bthis\.', _ln):
+        fail("listen.php uses `this.` inside a .then(function) callback — use the captured `self`/method instead")
+    if _in_then and '})' in _ln:
+        _in_then = False
+
 # 8. Timing helper is dependency-free (no curl/file reads) — structural
 if "curl_init" in timing.lower() or "curl_exec" in timing.lower() or "file_get_contents(" in timing.lower():
     fail("src/Timing.php must be dependency-free (no curl/file reads) so it stays host-testable")
