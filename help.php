@@ -29,9 +29,9 @@ $showDevTab = $uiLevel >= 3;
             <h3>What This Plugin Does</h3>
             <p>
                 <b>Listen Live</b> lets you hear your show's audio directly in the FPP web UI. Its primary playback path is
-                <b>Web Audio "Exact frame sync"</b>: FPP's MultiSync monotonic clock is extrapolated against a wall-clock
-                reference, short timestamped media chunks are fetched and decoded, and each chunk is scheduled
-                sample-accurately. Only about 0.6–1.5 seconds is buffered, so playback is gapless with minimal latency.
+                <b>Web Audio "Exact frame sync"</b>: FPP's native MultiSync clock is anchored with a monotonic RTT
+                measurement (never a wall-clock difference); short raw-PCM chunks are scheduled sample-accurately.
+                Only about 0.5 seconds is buffered, so playback stays responsive with minimal latency.
                 Enable <b>MultiSync</b> (FPP Settings → MultiSync) for exact timing across players and remotes.
             </p>
             <p>

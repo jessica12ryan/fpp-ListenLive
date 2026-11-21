@@ -132,6 +132,39 @@ checkFloat($e['seekPos'], 99.5, 'seamless seek at duration', __LINE__);
 checkFloat($e['remaining'], 0.0, 'no remaining at end', __LINE__);
 checkEq($e['durationArg'], '', 'no -t at end', __LINE__);
 
+CASE_('masterAt — monotonic only, never wall clocks');
+checkFloat(LLSyncTiming::masterAt(10.0, 1000.0, 1000.0), 10.0, 'no time passed', __LINE__);
+checkFloat(LLSyncTiming::masterAt(10.0, 1000.0, 1250.0), 10.25, '250ms forward', __LINE__);
+checkFloat(LLSyncTiming::masterAt(10.0, 1000.0, 900.0), 10.0, 'clock went backwards', __LINE__);
+// A 1.2s wall-clock skew must never enter the master position.
+checkFloat(LLSyncTiming::masterAt(10.0, 1000.0, 1100.0), 10.1, 'monotonic delta, no skew', __LINE__);
+
+CASE_('planChunk — content time == master time at scheduled start');
+$p = LLSyncTiming::planChunk(8.3849, 3.0, 0.5, 0.5);
+checkFloat($p['seek'], 8.885, 'seek = master + latency', __LINE__);
+checkFloat($p['when'], 3.5, 'when = ctx + latency', __LINE__);
+// At the scheduled instant, master has advanced by the latency and equals seek.
+// seek is rounded to ffmpeg's millisecond resolution => <0.5ms error.
+checkFloat($p['seek'], 8.3849 + ($p['when'] - 3.0), 'zero drift at start', __LINE__, 0.001);
+checkFloat($p['end'], 9.385, 'chunk end', __LINE__, 0.001);
+$p2 = LLSyncTiming::planChunk(0.0, 0.0, 0.5, 0.25);
+checkFloat($p2['seek'], 0.5, 'early track seek', __LINE__);
+
+CASE_('drift sign and thresholds');
+checkFloat(LLSyncTiming::drift(10.1, 10.0), 0.1, 'audio ahead positive', __LINE__);
+checkFloat(LLSyncTiming::drift(9.9, 10.0), -0.1, 'audio behind negative', __LINE__);
+check(!LLSyncTiming::shouldNudge(0.02), '20ms ignored', __LINE__);
+check(LLSyncTiming::shouldNudge(0.031), '31ms nudged', __LINE__);
+check(!LLSyncTiming::shouldResync(0.10), '100ms not resync', __LINE__);
+check(LLSyncTiming::shouldResync(0.151), '151ms resync', __LINE__);
+check(LLSyncTiming::shouldResync(-0.151), 'negative resync', __LINE__);
+
+CASE_('pcmFrames');
+checkEq(LLSyncTiming::pcmFrames(176400), 44100, '0.5s stereo 44.1k', __LINE__);
+checkEq(LLSyncTiming::pcmFrames(176400, 1), 88200, 'mono', __LINE__);
+checkEq(LLSyncTiming::pcmFrames(3), 0, 'short', __LINE__);
+checkEq(LLSyncTiming::pcmFrames(8, 0), 0, 'zero channels', __LINE__);
+
 if ($failures === 0) {
     echo "timing_test: all checks passed\n";
     exit(0);

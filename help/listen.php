@@ -1,5 +1,5 @@
 <h3>Listen Live — Listen</h3>
-<p>Play FPP's audio in your browser. The primary path is Web Audio <b>Exact frame sync</b>: short timestamped media chunks are decoded and scheduled sample-accurately against FPP's MultiSync clock, with only ~0.6–1.5 s buffered for gapless playback. If chunk fetch/decode fails a few times, the player switches to the raw <code>audio/mpeg</code> live stream and labels it <b>best-effort / NOT frame-exact</b> — browser buffering adds unmeasured latency, so that path cannot be frame-locked to MultiSync.</p>
+<p>Play FPP's audio in your browser. The primary path is Web Audio <b>Exact frame sync</b>: short raw-PCM chunks are scheduled sample-accurately against FPP's native MultiSync clock, with only ~0.5 s buffered (more when the tab is hidden). If chunk fetch/decode fails a few times, the player switches to the raw <code>audio/mpeg</code> live stream and labels it <b>best-effort / NOT frame-exact</b> — browser buffering adds unmeasured latency, so that path cannot be frame-locked to MultiSync.</p>
 
 <h4>Player</h4>
 <ul>
@@ -17,7 +17,7 @@
     <li><b>↻ Reconnect</b> — Forces a fresh connection and re-syncs the audio graph — useful after a network drop, a track change, or a fallback to the raw stream.</li>
     <li><b>Volume slider</b> — Sets volume 0–100%. Stored per browser in <code>localStorage</code> (<code>fpp-ListenLive-volume</code>).</li>
     <li><b>Mute / Unmute</b> — Mutes output but is <b>never persisted</b>: every page load starts unmuted.</li>
-    <li><b>Exact frame sync</b> (checkbox) — Web Audio chunk scheduling, <b>on by default on the first visit</b>. Needs MultiSync enabled (FPP Settings → MultiSync) for exact timing across players/remotes. The status text <code>#ll_exact_status</code> shows sync state and drift; uncheck it to use the native player path.</li>
+    <li><b>Exact frame sync</b> (checkbox) — Web Audio chunk scheduling, <b>on by default on the first visit</b>. Needs MultiSync enabled (FPP Settings → MultiSync) for exact timing across players/remotes. The status text <code>#ll_exact_status</code> shows <code>source</code>, RTT, queue, and measured drift. "Exact" is shown only when the native clock is in use; otherwise it is labeled <b>NOT frame-exact</b>. Uncheck it to use the best-effort native stream.</li>
 </ul>
 
 <h4>Status Grid (read-only info)</h4>

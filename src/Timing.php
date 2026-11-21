@@ -161,4 +161,55 @@ class LLSyncTiming
             'durationArg' => $durationArg,
         ];
     }
+
+    // --- Exact-scheduling math (mirrored by llClock/llExactAudio in listen.php) ---
+
+    /**
+     * Advance a master-clock sample to "now" using a MONOTONIC clock only.
+     * Never mix two machines' wall clocks: that injects clock skew as media lag.
+     */
+    public static function masterAt(float $masterAtSample, float $sampleMonoMs, float $nowMonoMs): float
+    {
+        $dt = ($nowMonoMs - $sampleMonoMs) / 1000.0;
+        return $masterAtSample + ($dt > 0 ? $dt : 0.0);
+    }
+
+    /**
+     * Anchor the first chunk: its content starts at master + latency, and it
+     * is scheduled to start at the same offset in AudioContext time. At the
+     * scheduled instant, content time == master time (zero drift by design).
+     */
+    public static function planChunk(float $masterNow, float $ctxNow, float $latency, float $chunkSeconds): array
+    {
+        $seek = $masterNow + $latency;
+        $when = $ctxNow + $latency;
+        return [
+            'seek' => round($seek, 3),
+            'when' => $when,
+            'end' => $seek + $chunkSeconds,
+        ];
+    }
+
+    /** Positive = browser audio is AHEAD of FPP; negative = behind. */
+    public static function drift(float $audioMedia, float $masterNow): float
+    {
+        return $audioMedia - $masterNow;
+    }
+
+    public static function shouldNudge(float $drift, float $nudge = 0.03): bool
+    {
+        return abs($drift) >= $nudge;
+    }
+
+    public static function shouldResync(float $drift, float $limit = 0.15): bool
+    {
+        return abs($drift) >= $limit;
+    }
+
+    /** Number of stereo 16-bit PCM frames in a chunk payload. */
+    public static function pcmFrames(int $bytes, int $channels = 2): int
+    {
+        if ($channels <= 0) return 0;
+        return intdiv(max(0, $bytes), 2 * $channels);
+    }
 }

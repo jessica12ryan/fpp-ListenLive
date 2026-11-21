@@ -3,7 +3,7 @@
     "/ListenLive/sync": {
       "get": {
         "summary": "Frame-exact sync state from FPP's MultiSync clock",
-        "description": "Returns the current media position from the native MultiSync clock, extrapolated with a monotonic (steady_clock) delta against a wall-clock reference so callers can schedule sample-accurate playback between sync packets. On players/remotes this requires MultiSync to be enabled (FPP Settings -> MultiSync); otherwise confidence is 'unresolved' and the PHP wrapper falls back to status polling. The native plugin also mirrors state to <mediadir>/plugindata/fpp-ListenLive/ll_sync.json. The legacy HTTP variant uses ?clock=1 to return the clock payload instead.",
+        "description": "Returns the current media or sequence position from FPP's native MultiSync clock, extrapolated with a steady_clock delta. Media and sequence sync are tracked separately; fresh media wins so the reported position always corresponds to the audio file being fetched. The PHP wrapper re-anchors the snapshot to its response time and returns master_seconds: the browser must add only its measured RTT/2 and must never subtract browser wall time from server wall time (that is clock skew, not latency). On players and remotes this requires MultiSync to be enabled (FPP Settings -> MultiSync); otherwise confidence is 'unresolved'. The native plugin also mirrors state to <mediadir>/plugindata/fpp-ListenLive/ll_sync.json. The legacy HTTP variant uses ?clock=1 to return the clock payload instead.",
         "responses": {
           "200": {
             "description": "Sync state (always answerable; precision degrades to unresolved/stale rather than failing)",
@@ -14,8 +14,13 @@
                   "properties": {
                     "has_media": { "type": "boolean", "description": "True when media is known and its position is non-negative." },
                     "media": { "type": "string", "description": "Filename currently reported by MultiSync." },
-                    "seconds": { "type": "number", "description": "Media position in seconds at the last sync packet." },
-                    "extrapolated_seconds": { "type": "number", "description": "Estimated current media position in seconds; -1 when no media or stale sync." },
+                    "seconds": { "type": "number", "description": "Media/sequence position in seconds at the last sync packet." },
+                    "extrapolated_seconds": { "type": "number", "description": "Estimated current position in seconds at the server timestamp; -1 when no media or stale sync." },
+                    "master_seconds": { "type": "number", "description": "PHP wrapper: authoritative master position at server response time. The client adds RTT/2 only — never a wall-clock difference." },
+                    "sync_age_ms": { "type": "integer", "description": "PHP wrapper: age of the sync snapshot at response time, in milliseconds." },
+                    "file_type": { "type": "string", "description": "'media' for a media file, 'sequence' for an fseq. The PHP wrapper maps a sequence clock to the current_song audio for chunk fetching." },
+                    "frames": { "type": "integer", "description": "Sequence frame number from the MultiSync packet; -1 for media." },
+                    "packet_age_ms": { "type": "integer", "description": "Age of the last native sync packet in milliseconds; -1 when no media." },
                     "extrapolated": { "type": "boolean", "description": "True when extrapolation was applied (last sync under 2 seconds old)." },
                     "frame": { "type": "integer", "description": "Approximate frame number at the last sync position (44.1 kHz); -1 when no media." },
                     "last_media_half": { "type": "integer", "description": "Half-second tick of the last recorded media position, used for dedup." },

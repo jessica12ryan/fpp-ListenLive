@@ -3,8 +3,8 @@
 
 <h4>Features</h4>
 <ul>
-    <li>Web Audio <b>Exact frame sync</b>, on by default on first visit: the MultiSync monotonic clock is extrapolated against a wall-clock reference and short media chunks are scheduled sample-accurately.</li>
-    <li>Small ~0.6–1.5 s chunk queue for gapless playback; live drift is shown in <code>#ll_exact_status</code> on the Listen page.</li>
+    <li>Web Audio <b>Exact frame sync</b>, on by default on first visit: FPP's native MultiSync clock is anchored with a monotonic RTT measurement and short raw-PCM chunks are scheduled sample-accurately.</li>
+    <li>Small ~0.5 s chunk queue; live drift, RTT, and clock source are shown in <code>#ll_exact_status</code> on the Listen page.</li>
     <li>PHP status-poll fallback when the native sync library or MultiSync is unavailable.</li>
     <li>Automatic fallback after repeated chunk failures to the raw <code>/stream</code> (<code>audio/mpeg</code>), clearly labeled <b>best-effort / NOT frame-exact</b>.</li>
     <li>Live capture via PipeWire/PulseAudio monitor or ALSA using FFmpeg → MP3 (<code>libmp3lame</code>); File Sync capture source also available.</li>
@@ -16,7 +16,7 @@
 <h4>How It Works</h4>
 <ol>
     <li>The Listen page reads <code>api/plugin/fpp-ListenLive/sync</code>, a wrapper around the native MultiSync clock (or the PHP status-poll fallback).</li>
-    <li>It fetches short chunks from <code>api/plugin/fpp-ListenLive/media?file=...&amp;seek=...&amp;duration=1.5</code>, decodes them with Web Audio, and schedules them against the master clock.</li>
+    <li>It fetches raw PCM chunks from <code>api/plugin/fpp-ListenLive/media?file=...&amp;seek=...&amp;duration=0.5&amp;format=pcm</code>, builds AudioBuffers directly, and schedules them against the master clock.</li>
     <li>If chunk fetch/decode fails repeatedly, playback switches to <code>api/plugin/fpp-ListenLive/stream</code> — a live capture of FPP's audio output. Browser buffering makes that path best-effort, not frame-exact.</li>
     <li>Enable MultiSync in FPP Settings → MultiSync for exact timing across players and remotes.</li>
 </ol>

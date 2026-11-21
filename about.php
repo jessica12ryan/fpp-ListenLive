@@ -34,7 +34,7 @@ $showDevTab = $uiLevel >= 3;
 
                 <h4>Features</h4>
                 <ul>
-                    <li>Web Audio <b>Exact frame sync</b>, on by default on first visit: FPP's MultiSync monotonic clock is extrapolated against a wall-clock reference, and short timestamped chunks are scheduled sample-accurately.</li>
+                    <li>Web Audio <b>Exact frame sync</b>, on by default on first visit: FPP's native MultiSync clock is anchored with a monotonic RTT measurement, and short raw-PCM chunks are scheduled sample-accurately.</li>
                     <li>Small ~0.6–1.5 s chunk queue for gapless, low-buffer playback; live drift shown beside the player (<code>#ll_exact_status</code>).</li>
                     <li>PHP status-poll fallback when the native sync library or MultiSync is unavailable.</li>
                     <li>Automatic fallback to the raw live stream (<code>/stream</code>, <code>audio/mpeg</code>) after repeated chunk failures, clearly labeled <b>best-effort / NOT frame-exact</b>.</li>

@@ -6,8 +6,8 @@
 
 Listen Live lets you monitor the audio FPP is sending to your audience from **Content Setup → Listen Live**, without extra hardware or an external server.
 
-- **Exact frame sync (primary path):** Web Audio is on by default on the first visit. The player reads FPP's MultiSync monotonic clock, extrapolates it against a wall-clock reference, fetches short timestamped chunks from `api/plugin/fpp-ListenLive/media?file=...&seek=...&duration=1.5`, and schedules them sample-accurately as `AudioBufferSourceNode`s. Only about **0.6–1.5 seconds** is queued, so playback stays gapless with minimal buffering. Current drift is shown in the on-page status (`#ll_exact_status`).
-- **MultiSync:** enable it in **FPP Settings → MultiSync** for exact timing across players and remotes. If the native sync library/MultiSync is unavailable, a PHP status-poll fallback keeps audio playing but is not frame-exact.
+- **Exact frame sync (primary path):** Web Audio is on by default on the first visit. The player reads FPP's native MultiSync clock, estimates its offset with a monotonic round-trip measurement (never by comparing browser and server wall clocks), and anchors a Web Audio timeline so each chunk's content time equals the FPP master position at the moment it is scheduled to sound. It fetches **0.5 s raw PCM chunks** from `api/plugin/fpp-ListenLive/media?file=...&seek=...&duration=0.5&format=pcm` and builds `AudioBuffer`s directly — no MP3 encoder/decoder priming. About **0.5 s** is queued (more when the tab is hidden). Drift is measured against the master clock and corrected with small nudges or a hard resync; the live value is shown in `#ll_exact_status`.
+- **MultiSync:** the native plugin hooks both **media** and **sequence** sync packets, so a playlist of `.fseq` sequences is timed from the same master clock as an MP3. Enable **MultiSync** in FPP Settings for exact timing across players and remotes. "Exact" is only claimed when the API reports `source: c++` and `confidence: exact`; otherwise the status is explicitly labeled **NOT frame-exact** even though audio keeps playing.
 - **Automatic raw-stream fallback:** if Web Audio cannot fetch or decode media chunks (for example, no media file or a decode failure), after a few failures the player switches to the raw live stream `api/plugin/fpp-ListenLive/stream` (`audio/mpeg`) and clearly labels it **best-effort / NOT frame-exact**. That stream is a live capture of FPP's audio output: it carries whatever is playing now, but browser buffering adds unmeasured latency, so it cannot be frame-locked to MultiSync.
 - Live status shows the current playlist, sequence/song, and elapsed time; the Listen page polls status every **500 ms**.
 - Volume is saved per browser in `localStorage`. **Mute is never persisted** — every page load starts unmuted.
@@ -78,20 +78,21 @@ The **Exact frame sync** toggle lives on the **Listen** page, next to the player
 ```
 Web Audio (exact, default)                      Raw stream (best-effort fallback)
 --------------------------------                ------------------------------------
-/sync -> MultiSync monotonic clock              /stream -> ffmpeg captures the
-         extrapolated vs wall clock                        FPP audio output
-   |                                                       (PipeWire/Pulse/ALSA)
-/media?file=...&seek=...&duration=1.5                      |
-   |  decodeAudioData()                                    v
+/sync -> native MultiSync media/sequence clock  /stream -> ffmpeg captures the
+   |      master_seconds at response time                  FPP audio output
+   |      + RTT/2 (monotonic), no wall clocks              (PipeWire/Pulse/ALSA)
+   |                                                       |
+/media?file=...&seek=...&duration=0.5&format=pcm          |
+   |  Int16Array -> AudioBuffer (no decoding)              v
    v                                            audio/mpeg (live capture)
-AudioBufferSourceNode scheduled sample-accurately
-   |  ~0.6-1.5 s queue, drift shown in #ll_exact_status
+AudioBufferSourceNode at master-anchored time
+   |  ~0.5 s queue, drift shown in #ll_exact_status
    v
 Speakers / headphones
 ```
 
-- The PHP `/sync` and `/clock` endpoints are wrappers around the native plugin routes (`/api/plugin-apis/ListenLive/sync` and `/api/plugin-apis/ListenLive/clock`). They prefer the native MultiSync clock and degrade to a PHP status-poll fallback (or PHP clocks) when the native library is unavailable.
-- Chunks are transcoded on demand from the media file inside FPP's media tree; media paths are validated so files outside that tree cannot be served.
+- The PHP `/sync` and `/clock` endpoints are wrappers around the native plugin routes (`/api/plugin-apis/ListenLive/sync` and `/api/plugin-apis/ListenLive/clock`). They prefer the native MultiSync clock and degrade to a PHP status-poll fallback (or PHP clocks) when the native library is unavailable. The wrapper re-anchors the snapshot to its response time exactly once; the browser adds only its measured RTT/2.
+- Chunks are cut on demand from the media file inside FPP's media tree as raw signed 16-bit PCM (no encoder priming, so sample 0 is exactly the requested seek); media paths are validated so files outside that tree cannot be served.
 - If Web Audio chunk fetch/decode fails repeatedly, playback switches to `/stream` and is labeled as best-effort, not frame-exact.
 
 See [apiDocs.json](apiDocs.json) for the native sync/clock route schemas.

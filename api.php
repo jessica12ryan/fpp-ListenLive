@@ -1412,17 +1412,36 @@ function llMediaStreamEndpoint() {
             }
         }
     }
-    // Seek with optional duration for chunked exact fetch (5s)
+    // Seek with optional duration for chunked exact fetch.
     $duration = isset($_GET['duration']) ? (float)$_GET['duration'] : 0;
+    $chunkFormat = isset($_GET['format']) ? strtolower((string)$_GET['format']) : 'mp3';
     if ($seek > 0 || $duration > 0) {
         $ffmpeg = llFindFfmpeg();
-        $durArg = $duration > 0 ? ' -t ' . escapeshellarg((string)$duration) : '';
+        $durArg = $duration > 0 ? ' -t ' . escapeshellarg(sprintf('%.3f', $duration)) : '';
         // Input seek (-ss before -i) is fast and honors fractional seconds;
         // truncating to int threw away up to 999ms of frame-exact precision.
-        $cmd = escapeshellarg($ffmpeg) . ' -hide_banner -loglevel error -ss ' . escapeshellarg(sprintf('%.3f', max(0, $seek))) . ' -i ' . escapeshellarg($path) . $durArg . ' -codec:a libmp3lame -b:a 128k -write_xing 0 -id3v2_version 0 -f mp3 -';
-        header('Content-Type: audio/mpeg');
+        $seekArg = escapeshellarg(sprintf('%.3f', max(0, $seek)));
+        if ($chunkFormat === 'pcm') {
+            // Sample-exact chunks: raw signed 16-bit PCM has no encoder/decoder
+            // priming delay, so the first sample really is the requested seek.
+            // The browser builds an AudioBuffer directly (no decodeAudioData).
+            $cmd = escapeshellarg($ffmpeg) . ' -nostdin -hide_banner -loglevel error' .
+                   ' -accurate_seek -ss ' . $seekArg . ' -i ' . escapeshellarg($path) . $durArg .
+                   ' -vn -map 0:a:0 -ac 2 -ar 44100 -f s16le -';
+            header('Content-Type: application/octet-stream');
+            header('X-Audio-Format: pcm-s16le');
+            header('X-Sample-Rate: 44100');
+            header('X-Channels: 2');
+            header('X-Seek: ' . sprintf('%.3f', max(0, $seek)));
+            if ($duration > 0) header('X-Duration: ' . sprintf('%.3f', $duration));
+        } else {
+            $cmd = escapeshellarg($ffmpeg) . ' -nostdin -hide_banner -loglevel error -accurate_seek -ss ' .
+                   $seekArg . ' -i ' . escapeshellarg($path) . $durArg .
+                   ' -codec:a libmp3lame -b:a 128k -write_xing 0 -id3v2_version 0 -f mp3 -';
+            header('Content-Type: audio/mpeg');
+        }
         llHeaderRemove('Content-Length');
-        header('Cache-Control: no-cache');
+        header('Cache-Control: no-store, no-cache, must-revalidate');
         set_time_limit(0);
         while (ob_get_level() > 0) @ob_end_clean();
         $handle = @popen($cmd . ' 2>/dev/null', 'r');
@@ -1573,23 +1592,72 @@ function llLogsEndpoint() {
 function llFppSyncFallback() {
     static $cache = null, $cachedAt = 0.0;
     $now = microtime(true);
-    if ($cache !== null && ($now - $cachedAt) < 0.25) return $cache;
+    if ($cache !== null && ($now - $cachedAt) < 0.25) {
+        // Advance the cached status sample to read time. fppd's elapsed is
+        // monotonic, so a short extrapolation is more precise than re-polling.
+        $c = $cache;
+        $dt = $now - (float)($c['snapshot_time'] ?? $now);
+        if ($dt >= 0 && $dt < 1.0 && $c['elapsed'] >= 0) {
+            $c['extrapolated_seconds'] = (float)$c['elapsed'] + $dt;
+        }
+        $c['snapshot_wall_ms'] = $now * 1000.0;
+        return $c;
+    }
+    $t0 = $now;
     $fppStatus = llGetFppStatus();
     $fallback = llGetFallbackMedia();
     $elapsed = LLSyncTiming::elapsedFromStatus($fppStatus, llGetBackgroundMusicStatus(), $fallback);
+    // fppd exposes sub-second precision when it provides milliseconds_elapsed.
+    // Do not leave the player quantised to whole seconds in fallback mode.
+    $msElapsed = llGetMultisyncElapsed($fppStatus);
+    if ($msElapsed !== null && $msElapsed >= 0) $elapsed = $msElapsed;
     $dur = LLSyncTiming::durationFromStatus($fppStatus, null, $fallback);
     $media = $fallback['media'] ?? $fppStatus['current_song'] ?? $fppStatus['current_sequence'] ?? '';
     if (!is_string($media)) $media = '';
+    // The samples were taken between $t0 and now; their effective time is the
+    // midpoint. Extrapolate from there so the returned position is at read time.
+    $snapshot = ($t0 + microtime(true)) / 2.0;
     $cache = [
         'has_media' => $media !== '' && $media !== 'false',
         'media' => $media,
         'seconds' => $elapsed,
+        'elapsed' => $elapsed,
         'extrapolated_seconds' => $elapsed,
         'duration' => $dur,
         'fpp_milliseconds' => $fppStatus['milliseconds_elapsed'] ?? null,
+        'snapshot_time' => $snapshot,
+        'snapshot_wall_ms' => $snapshot * 1000.0,
     ];
-    $cachedAt = $now;
+    $cachedAt = microtime(true);
     return $cache;
+}
+
+// Bring a sync snapshot forward to the server's response time exactly once.
+// The browser MUST NOT add (Date.now() - wall_ms): that is clock skew between
+// two machines, not latency. It adds only its measured RTT/2 to master_seconds.
+function llReanchorMaster(array $sync, $serverWallMs) {
+    $snap = null;
+    if (isset($sync['snapshot_wall_ms']) && is_numeric($sync['snapshot_wall_ms'])) {
+        $snap = (float)$sync['snapshot_wall_ms'];
+    } elseif (isset($sync['wall_ms']) && is_numeric($sync['wall_ms'])) {
+        $snap = (float)$sync['wall_ms'];
+    }
+    $base = (isset($sync['extrapolated_seconds']) && is_numeric($sync['extrapolated_seconds']))
+        ? (float)$sync['extrapolated_seconds']
+        : ((isset($sync['seconds']) && is_numeric($sync['seconds'])) ? (float)$sync['seconds'] : -1.0);
+    $sync['master_seconds'] = $base;
+    $sync['sync_age_ms'] = 0;
+    if ($snap !== null && $base >= 0) {
+        $age = ($serverWallMs - $snap) / 1000.0;
+        if ($age >= 0 && $age < 1.0) {
+            $sync['master_seconds'] = $base + $age;
+            $sync['sync_age_ms'] = (int)round($age * 1000);
+        } elseif ($age >= 1.0) {
+            // Stale snapshot: do not pretend it is current.
+            $sync['sync_age_ms'] = (int)round($age * 1000);
+        }
+    }
+    return $sync;
 }
 
 // The native clock is authoritative for time, but it has no media duration and
@@ -1609,6 +1677,8 @@ function llMergeSyncFallback(array $sync, array $fallback, $nowMono, $nowWall) {
             $sync['seconds'] = $fallback['seconds'];
             // Use fppd's clock here — MultiSync has no position for this media.
             $sync['extrapolated_seconds'] = $fallback['extrapolated_seconds'];
+            $sync['file_type'] = 'fppd-status';
+            $sync['snapshot_wall_ms'] = $fallback['snapshot_wall_ms'] ?? $nowWall;
             $sync['clock_source'] = 'fppd-status';
             $sync['confidence'] = 'unresolved';
         } else {
@@ -1617,6 +1687,11 @@ function llMergeSyncFallback(array $sync, array $fallback, $nowMono, $nowWall) {
             $sync['seconds'] = -1;
             $sync['extrapolated_seconds'] = -1;
         }
+    } elseif (!empty($sync['file_type']) && $sync['file_type'] === 'sequence' && !empty($fallback['media'])) {
+        // A sequence (.fseq) reports the master clock but is not an audio file.
+        // Keep the sync position, but fetch current_song audio for the chunks.
+        $sync['sync_media'] = $sync['media'];
+        $sync['media'] = $fallback['media'];
     }
     return $sync;
 }
@@ -1625,11 +1700,9 @@ function llSyncEndpoint() {
     // Never 503 here: sync precision degrades (c++ -> file -> status poll)
     // instead of failing. JS polls this while playing; a 503 breaks exact sync.
     $syncFile = llGetPlugindataDir() . '/ll_sync.json';
-    $nowMono = LLSyncTiming::monotonicMs();
-    $nowWall = LLSyncTiming::wallClockMs();
     $fallback = llFppSyncFallback();
 
-    // Try C++ plugin API via Apache proxy — stable surface (§3.3), most precise
+    // Try C++ plugin API via Apache proxy — stable surface (§3.3), most precise.
     $cppSync = null;
     if (function_exists('curl_init')) {
         $ch = curl_init('http://localhost/api/plugin-apis/ListenLive/sync');
@@ -1642,45 +1715,55 @@ function llSyncEndpoint() {
             $cppSync = json_decode($tmp, true);
         }
     }
+    // Capture server timestamps AFTER the native call. Capturing them before
+    // (the old behaviour) reported `server_wall_ms` tens of ms in the past.
+    $nowMono = LLSyncTiming::monotonicMs();
+    $nowWall = LLSyncTiming::wallClockMs();
+
     if (is_array($cppSync)) {
+        // C++ wall_ms and PHP wall clocks are the same clock on the same host,
+        // so this age is well defined (monotonic_ms epochs are NOT comparable).
+        $cppSync['snapshot_wall_ms'] = isset($cppSync['wall_ms']) && is_numeric($cppSync['wall_ms'])
+            ? (float)$cppSync['wall_ms'] : (float)$nowWall;
+        $cppSync['native_wall_ms'] = $cppSync['snapshot_wall_ms'];
         $sync = llMergeSyncFallback($cppSync, $fallback, $nowMono, $nowWall);
+        $sync = llReanchorMaster($sync, $nowWall);
         $sync['source'] = 'c++';
         return llJson($sync);
     }
+
     // File written by the C++ plugin (plugindata only — never /tmp).
     if (is_readable($syncFile)) {
         $j = @json_decode(@file_get_contents($syncFile), true);
         if (is_array($j) && array_key_exists('media', $j)) {
-            if (isset($j['monotonic_ms'], $j['seconds']) && is_numeric($j['monotonic_ms']) && is_numeric($j['seconds']) && $j['seconds'] >= 0) {
-                $delta = ($nowMono - (float)$j['monotonic_ms']) / 1000.0;
-                if ($delta >= 0 && $delta < 2.0) {
-                    $j['extrapolated_seconds'] = (float)$j['seconds'] + $delta;
+            if (isset($j['wall_ms'], $j['seconds']) && is_numeric($j['wall_ms']) && is_numeric($j['seconds']) && $j['seconds'] >= 0) {
+                $age = ($nowWall - (float)$j['wall_ms']) / 1000.0;
+                if ($age >= 0 && $age < 2.0) {
+                    $j['extrapolated_seconds'] = (float)$j['seconds'] + $age;
                     $j['extrapolated'] = true;
                 }
             }
+            $j['snapshot_wall_ms'] = $nowWall;
             $sync = llMergeSyncFallback($j, $fallback, $nowMono, $nowWall);
+            $sync = llReanchorMaster($sync, $nowWall);
             $sync['source'] = 'file';
             return llJson($sync);
         }
     }
-    // Final fallback: status poll (int seconds) — not frame-exact
-    return llJson([
-        'has_media' => $fallback['has_media'],
-        'media' => $fallback['media'],
-        'seconds' => $fallback['seconds'],
-        'extrapolated_seconds' => $fallback['extrapolated_seconds'],
-        'frame' => $fallback['extrapolated_seconds'] >= 0 ? (int)($fallback['extrapolated_seconds'] * 44100) : -1,
-        'monotonic_ms' => $nowMono,
-        'wall_ms' => $nowWall,
-        'epoch_ms' => $nowWall - $nowMono, // approx
-        'server_monotonic_ms' => $nowMono,
-        'server_wall_ms' => $nowWall,
-        'confidence' => $fallback['has_media'] ? 'unresolved' : 'unresolved',
-        'source' => 'fallback',
-        'duration' => $fallback['duration'],
-        'has_duration' => is_numeric($fallback['duration']) && (float)$fallback['duration'] > 0,
-        'fpp_milliseconds' => $fallback['fpp_milliseconds'],
-    ]);
+
+    // Final fallback: status poll — not frame-exact, but sub-second where fppd
+    // provides milliseconds_elapsed and extrapolated to response time.
+    $sync = $fallback;
+    $sync['monotonic_ms'] = $nowMono;
+    $sync['wall_ms'] = $nowWall;
+    $sync['epoch_ms'] = $nowWall - $nowMono; // approx
+    $sync['frame'] = $fallback['extrapolated_seconds'] >= 0 ? (int)($fallback['extrapolated_seconds'] * 44100) : -1;
+    $sync['file_type'] = 'fppd-status';
+    $sync['confidence'] = 'unresolved';
+    $sync = llMergeSyncFallback($sync, $fallback, $nowMono, $nowWall);
+    $sync = llReanchorMaster($sync, $nowWall);
+    $sync['source'] = 'fallback';
+    return llJson($sync);
 }
 
 function llClockEndpoint() {
