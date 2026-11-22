@@ -2,7 +2,7 @@
 	"repoName": "fpp-ListenLive",
 	"name": "Listen Live Plugin for FPP",
 	"author": "jessica12ryan",
-	"description": "Listen to your show's audio in the FPP UI. Frame-exact playback uses FPP's MultiSync clock with raw PCM blocks scheduled by Web Audio; playback auto-starts with FPP and the best-effort MP3 fallback streams the current media file before live capture. Includes live status and volume control. Audio stays on your LAN.",
+	"description": "Listen to your show's audio in the FPP UI. Frame-exact playback uses FPP's MultiSync clock with raw PCM blocks scheduled by Web Audio; playback auto-starts with FPP and the best-effort MP3 fallback streams the current media file before live capture. Includes live status and volume control. Captured audio is never stored and stays on your LAN.",
 	"minMemoryMB": 512,
 	"minCpuCores": 1,
 	"homeURL": "https://github.com/jessica12ryan/fpp-ListenLive",
@@ -11,10 +11,15 @@
 	"iconURL": "https://raw.githubusercontent.com/jessica12ryan/fpp-ListenLive/main/icon.png",
 	"releaseNotesStyle": "gitHistory",
 	"privacy": {
-		"summary": "Reads FPP's current media file or its own audio-output monitor on the FPP host and streams it to your browser on your home LAN so you can hear what the audience hears. No microphone or camera is accessed; nothing is uploaded or sent to the internet.",
+		"summary": "Streams FPP's audio to your browser on your LAN. Capture uses an output monitor/loopback or the device you choose in Config, which on some hardware is a microphone. Nothing is stored or sent off-box.",
 		"sends": [],
 		"collects": [],
-		"sensors": [],
+		"sensors": [
+			{
+				"type": "microphone",
+				"stored": false
+			}
+		],
 		"remoteAccess": "none",
 		"systemChanges": [
 			{
@@ -23,7 +28,7 @@
 			}
 		],
 		"closedCode": false,
-		"other": "Camera and microphone access: none. The browser never requests microphone or camera permission, and the live-capture fallback reads only FPP's own audio output (PipeWire/PulseAudio monitor or ALSA loopback) on the host — not a mic input. Settings are stored by FPP in <mediadir>/config/plugin.fpp-ListenLive (not in the plugin directory); a legacy config/settings.json is migrated to <mediadir>/plugindata/fpp-ListenLive on install. Audio is served only to browsers on your LAN, and logs go to <mediadir>/logs/plugin-fpp-ListenLive.log. Your browser keeps its volume and Exact-sync toggle preferences in localStorage; mute is never saved."
+		"other": "Camera access: none. The browser never requests camera or microphone permission. On the host, live capture uses ffmpeg with a PipeWire/PulseAudio monitor, an ALSA loopback, or the capture device chosen in Config; on hardware with a microphone attached, a fallback device may be a mic input. Captured audio is streamed only to browsers on your LAN and is never written to disk. Settings are stored by FPP in <mediadir>/config/plugin.fpp-ListenLive (not in the plugin directory); a legacy config/settings.json is migrated to <mediadir>/plugindata/fpp-ListenLive on install. Logs go to <mediadir>/logs/plugin-fpp-ListenLive.log. Your browser keeps its volume and Exact-sync toggle preferences in localStorage; mute is never saved."
 	},
 	"versions": [
 		{

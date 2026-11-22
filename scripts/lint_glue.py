@@ -11,6 +11,7 @@ structurally.
 Run:  python3 scripts/lint_glue.py
 """
 
+import json
 import pathlib
 import re
 import sys
@@ -179,6 +180,28 @@ for doc in DOC_FILES:
     for stale in STALE_DOC_TEXT:
         if stale in text:
             fail("documentation '%s' still contains stale text: %s" % (doc, stale))
+
+# 13. The privacy disclosure and the docs must agree about microphone access.
+# The capture path falls back to generic ALSA/Pulse devices, which on some
+# hardware are microphone inputs. The manifest declares a microphone sensor
+# (stored: false); no doc may go back to claiming no microphone is accessed.
+try:
+    privacy = json.loads(read(ROOT / "pluginInfo.json"))["privacy"]
+    declares_mic = any(s.get("type") == "microphone" for s in privacy.get("sensors", []))
+    mic_denials = (
+        "No microphone or camera is accessed",
+        "not a mic input",
+        "Camera and microphone access: none",
+    )
+    mic_claims = ("may be a mic input", "can be a microphone", "on some hardware is a microphone")
+    for doc in DOC_FILES:
+        text = read(ROOT / doc)
+        if declares_mic and any(s in text for s in mic_denials):
+            fail("documentation '%s' denies microphone access but pluginInfo.json declares a microphone sensor" % doc)
+        if not declares_mic and any(s in text for s in mic_claims):
+            fail("documentation '%s' claims microphone capture but pluginInfo.json declares no microphone sensor" % doc)
+except (KeyError, ValueError):
+    fail("pluginInfo.json has no readable privacy block")
 
 if failures:
     print("glue lint FAILED:")

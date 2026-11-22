@@ -128,7 +128,7 @@ $showDevTab = $uiLevel >= 3;
             <p>You can open the raw stream in VLC: <code>http://&lt;fpp-host&gt;/api/plugin/fpp-ListenLive/stream</code>. Remember: best-effort monitoring, not frame-locked.</p>
 
             <h4>Privacy</h4>
-            <p>Audio is captured or read on the FPP host and streamed to your browser on the LAN. No microphone or camera is accessed — the browser never requests those permissions, and live capture reads only FPP's own audio output (monitor/loopback), not a mic input. Nothing is sent off-box, audio is not stored, and there is no telemetry, advertising, or donations. Your browser stores volume and Exact-sync preferences; mute is never saved.</p>
+            <p>Audio is captured or read on the FPP host and streamed to your browser on the LAN. The browser never requests camera or microphone permission, and no camera is used. Live capture uses a PipeWire/PulseAudio monitor, an ALSA loopback, or the capture device selected in Config — on hardware with a microphone attached, a fallback device may be a mic input. Captured audio is streamed only to browsers on your LAN and is never written to disk. Nothing is sent off-box, and there is no telemetry, advertising, or donations. Your browser stores volume and Exact-sync preferences; mute is never saved.</p>
 
             <hr>
 
