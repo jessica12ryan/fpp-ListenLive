@@ -101,7 +101,7 @@ See [apiDocs.json](apiDocs.json) for the native sync/clock route schemas.
 
 ## Privacy
 
-Audio is captured on the FPP host and streamed to your browser **on your LAN**. Nothing is sent off-box, audio is not stored, and there is no telemetry, advertising, or donations. Your browser keeps its volume and Exact-sync toggle preferences in `localStorage` (mute is never saved). Settings stay in FPP's plugin configuration and the log stays under `<mediadir>/logs/`.
+Audio is captured on the FPP host and streamed to your browser **on your LAN**. No microphone or camera is accessed — the browser never requests those permissions, and live capture reads only FPP's own audio output (monitor/loopback), not a mic input. Nothing is sent off-box, audio is not stored, and there is no telemetry, advertising, or donations. Your browser keeps its volume and Exact-sync toggle preferences in `localStorage` (mute is never saved). Settings stay in FPP's plugin configuration and the log stays under `<mediadir>/logs/`.
 
 ## API Endpoints
 

@@ -11,15 +11,10 @@
 	"iconURL": "https://raw.githubusercontent.com/jessica12ryan/fpp-ListenLive/main/icon.png",
 	"releaseNotesStyle": "gitHistory",
 	"privacy": {
-		"summary": "Captures FPP's live audio mix and streams it to your browser on your home LAN so you can hear what the audience hears. Nothing is uploaded or sent to the internet.",
+		"summary": "Reads FPP's current media file or its own audio-output monitor on the FPP host and streams it to your browser on your home LAN so you can hear what the audience hears. No microphone or camera is accessed; nothing is uploaded or sent to the internet.",
 		"sends": [],
 		"collects": [],
-		"sensors": [
-			{
-				"type": "microphone",
-				"stored": false
-			}
-		],
+		"sensors": [],
 		"remoteAccess": "none",
 		"systemChanges": [
 			{
@@ -28,7 +23,7 @@
 			}
 		],
 		"closedCode": false,
-		"other": "Settings are stored by FPP in <mediadir>/config/plugin.fpp-ListenLive (not in the plugin directory); a legacy config/settings.json is migrated to <mediadir>/plugindata/fpp-ListenLive on install. Audio is served only to browsers on your LAN, and logs go to <mediadir>/logs/plugin-fpp-ListenLive.log. Your browser keeps its volume and Exact-sync toggle preferences in localStorage; mute is never saved."
+		"other": "Camera and microphone access: none. The browser never requests microphone or camera permission, and the live-capture fallback reads only FPP's own audio output (PipeWire/PulseAudio monitor or ALSA loopback) on the host — not a mic input. Settings are stored by FPP in <mediadir>/config/plugin.fpp-ListenLive (not in the plugin directory); a legacy config/settings.json is migrated to <mediadir>/plugindata/fpp-ListenLive on install. Audio is served only to browsers on your LAN, and logs go to <mediadir>/logs/plugin-fpp-ListenLive.log. Your browser keeps its volume and Exact-sync toggle preferences in localStorage; mute is never saved."
 	},
 	"versions": [
 		{
