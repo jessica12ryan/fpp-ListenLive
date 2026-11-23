@@ -128,6 +128,25 @@ if not _hr or '.fill()' not in _hr.group(0):
 if listen.count('nativeIsBridge()') < 6:
     fail("listen.php native event handlers must guard with nativeIsBridge() so bridge events cannot reconnect")
 
+# 7e. A Web Audio fallback must actually revive the native stream. The bridge
+# is no longer suspended, so resumeNative() must not be gated on a flag that is
+# never set true — otherwise a bridge that ended or errored stays dead and the
+# "fallback: live stream" status is audible silence.
+_fb = _re.search(r'fallBackToNative: function.*?\n    \},', listen, _re.S)
+if not _fb or 'resumeNative()' not in _fb.group(0):
+    fail("listen.php fallBackToNative() must restart the native stream via resumeNative()")
+_rn = _re.search(r'resumeNative: function.*?\n    \},', listen, _re.S)
+if not _rn:
+    fail("listen.php defines no resumeNative() — fallback cannot revive native audio")
+else:
+    rn_body = _rn.group(0)
+    if _re.search(r'if\s*\(\s*[^)]*!\s*llPlayer\.nativeSuspended', rn_body):
+        fail("listen.php resumeNative() must not be gated on nativeSuspended (never set true) — fallback would stay silent")
+    if not all(x in rn_body for x in ('buildUrl()', '.load()', '.play()')):
+        fail("listen.php resumeNative() must open a fresh cache-busted src, load and play it")
+if 'suspendNative' in listen:
+    fail("listen.php still references suspendNative() — the native bridge is no longer suspended")
+
 # 8. Timing helper is dependency-free (no curl/file reads) — structural
 if "curl_init" in timing.lower() or "curl_exec" in timing.lower() or "file_get_contents(" in timing.lower():
     fail("src/Timing.php must be dependency-free (no curl/file reads) so it stays host-testable")

@@ -60,5 +60,33 @@ for (const s of engine.scheduled) {
 if (Math.abs(engine.nextWhen - cursorWhen) > 0.001) fail('nextWhen not contiguous');
 if (Math.abs(engine.nextSeek - cursorSeek) > 0.001) fail('nextSeek not contiguous');
 
+// Fallback must revive the native stream. The bridge is no longer suspended,
+// so resumeNative() may not be gated on a flag that is never set true.
+const rnMarker = '    resumeNative: function() {';
+const rnStart = php.indexOf(rnMarker);
+if (rnStart < 0) fail('resumeNative not found');
+const rnEndMarker = '\n    },';
+const rnEnd = php.indexOf(rnEndMarker, rnStart);
+if (rnEnd < 0) fail('resumeNative end not found');
+let rnMethod = php.slice(rnStart, rnEnd + rnEndMarker.length).trim();
+if (rnMethod.endsWith(',')) rnMethod = rnMethod.slice(0, -1);
+const player = eval('({' + rnMethod + '})');
+player.audio = {
+  muted: true,
+  paused: true,
+  src: '',
+  load() { this.loaded = true; },
+  play() { this.played = true; return Promise.resolve(); }
+};
+player.isPlaying = true;
+player.reconnectAttempts = 3;
+player.buildUrl = () => 'stream?t=123';
+global.llPlayer = player;
+player.resumeNative();
+if (player.audio.src !== 'stream?t=123') fail('resumeNative did not set a fresh cache-busted src');
+if (!player.audio.loaded) fail('resumeNative did not reload the native element');
+if (!player.audio.played) fail('resumeNative did not start playback');
+if (player.reconnectAttempts !== 0) fail('resumeNative did not reset reconnect attempts');
+
 function fail(msg) { console.error('exact_audio_test: FAIL ' + msg); process.exit(1); }
 console.log('exact_audio_test: all checks passed');

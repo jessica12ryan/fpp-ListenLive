@@ -130,8 +130,7 @@ var llClock = {
     monotonicMs: function() {
         if (window.performance && performance.now) return performance.now();
         return Date.now();
-    },
-    wallMs: function() { return Date.now(); }
+    }
 };
 // Master clock from FPP's native MultiSync position.
 // Never compare two machines' wall clocks: Date.now() - d.wall_ms is clock
@@ -248,12 +247,6 @@ var llExact = {
         try { v = localStorage.getItem('fpp-ListenLive-useExact'); } catch (e) {}
         this.useExact = (v === '1');
         if (llExactAudio.useAudio) this.useExact = false;
-    },
-    toggle: function(enabled) {
-        this.useExact = !!enabled;
-        try { localStorage.setItem('fpp-ListenLive-useExact', this.useExact ? '1' : '0'); } catch (e) {}
-        if (this.useExact) { this.stop(); if (llPlayer.isPlaying) this.start(); }
-        else this.stop();
     },
     start: function() {
         this.stop();
@@ -582,15 +575,6 @@ var llExactAudio = {
             this.hardResync(llMasterClock.masterNow(), 'new track', this.targetLatency);
             this.fill();
         }
-    },
-
-    // Start the new track exactly where the audible chunk ends instead of a
-    // fixed 120 ms later. Removes the cutover gap without adding latency.
-    cutoverLead: function() {
-        if (!this.ctx) return this.targetLatency;
-        var active = this.activeSource(this.ctx.currentTime);
-        if (active) return Math.max(0.02, active.end - this.ctx.currentTime + 0.01);
-        return this.targetLatency;
     },
 
     reanchor: function() {
@@ -976,9 +960,9 @@ var llPlayer = {
     initialConnect: false,
     initialConnectTimer: null,
     streamUrl: 'api/plugin/fpp-ListenLive/stream',
-    // True while the muted native element is paused because Web Audio is
-    // audible. Guards the pause handler so suspending it never looks like a
-    // user Pause.
+    // Kept as a guard for the pause/suspend handlers. The native bridge is no
+    // longer paused while Web Audio is audible, so this stays false; it is
+    // reset on every (re)start for the handlers that still check it.
     nativeSuspended: false,
     reconnecting: false,
     suppressNativePause: false,
@@ -994,15 +978,15 @@ var llPlayer = {
     // Deadline-at-read: monotonic timestamp of last media change for confidence
     lastMediaAnnouncedAtMono: null,
     lastElapsedHalf: null,
-    lastSendErrorCount: 0,
+    lastDuHalf: null,
     // Append cache buster to force reconnect without browser cache
     buildUrl: function() { return llPlayer.streamUrl + '?t=' + Date.now(); },
     // The native element is audible unless the user muted it OR Web Audio is
     // actually producing sound. Never leave it muted with no Web Audio output:
     // that is the "playing but silent" failure mode. While Web Audio is
-    // audible the native stream is suspended too: it is a second ffmpeg/PHP
-    // stream whose only job is the fallback, and keeping it running starves
-    // the PCM chunk fetches.
+    // audible the native stream stays connected but muted as a fallback
+    // bridge; its events are ignored by nativeIsBridge() so they cannot tear
+    // down exact playback.
     nativeIsBridge: function() {
         // The muted native stream is only a fallback/transition bridge. Its
         // events must never tear down the exact engine.
@@ -1019,15 +1003,12 @@ var llPlayer = {
         // idempotent, so the extra engine events are harmless.
         try { llPlayer.audio.muted = llPlayer.isMuted || webAudioAudible; } catch(e) {}
     },
-    suspendNative: function() {
-        if (!llPlayer.audio || llPlayer.nativeSuspended) return;
-        llPlayer.nativeSuspended = true;
-        try { llPlayer.audio.pause(); } catch(e) {}
-    },
     resumeNative: function() {
-        if (!llPlayer.audio || !llPlayer.nativeSuspended) return;
-        llPlayer.nativeSuspended = false;
-        if (!llPlayer.isPlaying) return;
+        // Called only by fallBackToNative(). The native element may have ended
+        // or stalled while it was a muted bridge (those events are suppressed
+        // by nativeIsBridge), so always open a fresh stream. nativeSuspended is
+        // never set now — the bridge stays live while Web Audio is audible.
+        if (!llPlayer.audio || !llPlayer.isPlaying) return;
         // A paused <audio> element keeps its old buffered bytes. Resuming it
         // would replay the first track from page start. Always open a fresh
         // stream for whatever FPP is playing now.
@@ -1454,7 +1435,7 @@ var llPlayer = {
 
     pause: function() {
         // Set state first: llExactAudio.stop() re-evaluates native muting and
-        // must not resume the native stream we are about to pause.
+        // must leave the native stream paused along with the rest of playback.
         llPlayer.isPlaying = false;
         llPlayer.setUserPaused(true);
         try { llExactAudio.stop(); } catch(e) {}
@@ -1643,6 +1624,10 @@ var llPlayer = {
                     if (media.playlist || media.count !== "0") media = JSON.stringify(media);
                     else media = '';
                 }
+                // Media key is needed by the timing dedup below as well as by
+                // track-change detection later in this poll, so compute it once
+                // here before either use (var hoisting made it undefined below).
+                var currentMediaKey = (media || '') + '|' + (s.current_playlist || '') + '|' + (isBackgroundPlaying ? 'background' : 'fpp') + '|' + (media || '');
                 // Auto-play: FPP is the transport authority. If a show is
                 // already on air when the page opens (or starts later), begin
                 // listening without a click. An explicit Pause and a browser
@@ -1759,7 +1744,6 @@ var llPlayer = {
                 $('#ll_bitrate').text(settings.bitrate || '128k');
 
                 // Track change — deadline-at-read confidence (mirrors PendingInsertMirror settle)
-                var currentMediaKey = (media || '') + '|' + (s.current_playlist || '') + '|' + (isBackgroundPlaying ? 'background' : 'fpp') + '|' + (media || '');
                 var mediaChanged = llPlayer.lastMedia !== currentMediaKey && currentMediaKey;
                 if (mediaChanged) {
                     llPlayer.lastMediaAnnouncedAtMono = llClock.monotonicMs();
@@ -1769,74 +1753,13 @@ var llPlayer = {
                         setTimeout(function(){ if (llPlayer.isPlaying) llExact.start(); }, 250);
                     }
                 }
-                // File-sync is disabled per user request (live only), but keep display in sync
-                var isFileSync = false;
-                if (false && llPlayer.isPlaying && llPlayer.lastMedia && llPlayer.lastMedia !== currentMediaKey && isFileSync) {
-                    $('#ll_status_text').html('<span class="text-warning">Track changed — re-syncing...</span>');
-                    // Reset drift tracking for new track
-                    llPlayer.streamStartElapsed = null;
-                    llPlayer.streamStartTime = null;
-                    llPlayer.driftChecks = 0;
-                    llPlayer.trackChangePending = true;
-                    llPlayer.lastMedia = currentMediaKey;
-                    clearTimeout(llPlayer.stalledTimer);
-                    clearTimeout(llPlayer.waitingTimer);
-                    clearTimeout(llPlayer.trackChangeTimeout);
-                    llPlayer.trackChangeTimeout = setTimeout(function(){ llPlayer.trackChangePending = false; }, 8000);
-                    setTimeout(function(){
-                        // Double-check new track still current before reconnect (avoid flapping if status hasn't settled)
-                        $.ajax({
-                            url: 'api/plugin/fpp-ListenLive/status',
-                            type: 'GET',
-                            dataType: 'json',
-                            success: function(nd) {
-                                var nm = (nd.fpp_status && (nd.fpp_status.current_song || nd.fpp_status.current_sequence)) || (nd.background_status && nd.background_status.currentTrack) || '';
-                                if (nm && media && nm !== media.split(' (')[0]) {
-                                    // Status still shows old track, wait a bit more
-                                    setTimeout(function(){ if (llPlayer.isPlaying) llPlayer.reconnect(); }, 800);
-                                } else {
-                                    if (llPlayer.isPlaying) llPlayer.reconnect();
-                                }
-                            },
-                            error: function(){ if (llPlayer.isPlaying) llPlayer.reconnect(); }
-                        });
-                    }, 1800);
-                } else {
-                    llPlayer.lastMedia = currentMediaKey;
-                }
+                // File-sync is disabled (live capture only); still track the
+                // media key so the next poll can detect a track change.
+                llPlayer.lastMedia = currentMediaKey;
 
-                // Drift correction disabled — live capture is gapless, no file-sync drift
-                if (false && llPlayer.isPlaying && isFileSync && !llPlayer.trackChangePending && llPlayer.audio && !llPlayer.audio.paused && llPlayer.audio.readyState >= 2) {
-                    var currentFallbackElapsed = 0;
-                    if (d.background_status && typeof d.background_status.trackElapsed === 'number') currentFallbackElapsed = d.background_status.trackElapsed;
-                    else if (typeof s.seconds_elapsed === 'number') currentFallbackElapsed = s.seconds_elapsed;
-                    else if (d.fallback_media && typeof d.fallback_media.elapsed === 'number') currentFallbackElapsed = d.fallback_media.elapsed;
-                    if (llPlayer.streamStartElapsed === null && currentFallbackElapsed > 0) {
-                        llPlayer.streamStartElapsed = currentFallbackElapsed;
-                        llPlayer.streamStartTime = llClock.monotonicMs();
-                        llPlayer.driftChecks = 0;
-                    } else if (llPlayer.streamStartElapsed !== null && currentFallbackElapsed > 0) {
-                        var wallElapsed = (llClock.monotonicMs() - llPlayer.streamStartTime) / 1000;
-                        var expectedAudioTime = currentFallbackElapsed - llPlayer.streamStartElapsed;
-                        var actual = llPlayer.audio.currentTime;
-                        // Account for initial seek offset already in stream (stream starts at seekPos, so actual 0 = elapsed)
-                        // Drift is actual vs expected
-                        var drift = actual - expectedAudioTime;
-                        if (wallElapsed > 6 && Math.abs(drift) > 2.8) {
-                            llPlayer.driftChecks = (llPlayer.driftChecks || 0) + 1;
-                            if (llPlayer.driftChecks >= 2) {
-                                $('#ll_status_text').html('<span class="text-warning">Drift ' + drift.toFixed(1) + 's — re-syncing...</span>');
-                                llPlayer.driftChecks = 0;
-                                llPlayer.streamStartElapsed = currentFallbackElapsed;
-                                llPlayer.streamStartTime = llClock.monotonicMs();
-                                setTimeout(function(){ if (llPlayer.isPlaying) llPlayer.reconnect(); }, 400);
-                            }
-                        } else {
-                            // Small drift, reset counter
-                            if (Math.abs(drift) < 1.5) llPlayer.driftChecks = 0;
-                        }
-                    }
-                } else if (!llPlayer.isPlaying) {
+                // Drift correction is disabled — live capture is gapless.
+                // Clear the display drift trackers whenever playback stops.
+                if (!llPlayer.isPlaying) {
                     llPlayer.streamStartElapsed = null;
                     llPlayer.streamStartTime = null;
                     llPlayer.driftChecks = 0;
@@ -1891,7 +1814,8 @@ var llPlayer = {
                 html += '<tr><td style="padding:4px;"><b>PipeWire:</b></td><td style="padding:4px;">' + (det.pipewire ? '<span class="text-success">Available</span>' : '<span class="text-secondary">Not detected</span>') + (det.pipewire_sources && det.pipewire_sources.length ? ' <span class="text-secondary">(' + escHtml(det.pipewire_sources.slice(0,2).join(', ')) + ')</span>' : '') + ' <span data-bs-toggle="tooltip" data-bs-html="true" data-bs-title="PipeWire availability (FPP 9+). Required for exact capture via fpp_group_default.monitor. Lists detected monitor sources."><img src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span></td></tr>';
                 html += '<tr><td style="padding:4px;"><b>PulseAudio:</b></td><td style="padding:4px;">' + (det.pulse ? '<span class="text-success">Available</span> <span class="text-secondary">(pipewire-pulse compat)</span>' : '<span class="text-secondary">Not detected</span>') + (det.pulse_sources && det.pulse_sources.length ? ' <span class="text-secondary">(' + escHtml(det.pulse_sources.slice(0,2).join(', ')) + ')</span>' : '') + ' <span data-bs-toggle="tooltip" data-bs-html="true" data-bs-title="PulseAudio (pipewire-pulse compatibility) availability and detected sources. Auto mode uses .monitor sources for exact copy of output."><img src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span></td></tr>';
                 html += '<tr><td style="padding:4px;"><b>ALSA:</b></td><td style="padding:4px;">' + (det.alsa ? '<span class="text-success">Available</span>' : '<span class="text-secondary">Not detected</span>') + (det.alsa_devices && det.alsa_devices.length ? ' <span class="text-secondary">(' + escHtml(det.alsa_devices.slice(0,2).join(', ')) + ')</span>' : '') + ' <span data-bs-toggle="tooltip" data-bs-html="true" data-bs-title="ALSA availability and devices (default, hw:0,0 etc). Used when Pulse not available or for direct hardware capture."><img src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span></td></tr>';
-                // Fallback media is display-only, not used for streaming (live capture only)
+                // Fallback media is detected for status display; the stream
+                // endpoint may also use it for file-sync before live capture.
                 if (d.fallback_media) {
                     var fm = d.fallback_media;
                     html += '<tr><td style="padding:4px;"><b>Detected media (display only):</b></td><td style="padding:4px;">' + escHtml(fm.type + ': ' + fm.media) + (fm.path ? ' <span class="text-secondary">(' + escHtml(fm.path) + ')</span>' : ' <span class="text-secondary">(file not found — live capture only)</span>') + ' <span data-bs-toggle="tooltip" data-bs-html="true" data-bs-title="Fallback media detection: type and path status. Display only — live capture streams the live mix, not this file."><img src="images/redesign/help-icon.svg" class="icon-help" alt="help"></span></td></tr>';

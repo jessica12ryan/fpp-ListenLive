@@ -711,19 +711,6 @@ function llGetMediaPath($mediaName) {
     return null;
 }
 
-function llIsSilenceBuffer($buffer) {
-    // Very rough silence detection: check if MP3 payload after headers is mostly zeros
-    // MP3 frames start with 0xFF 0xFB or similar sync; silence will have low energy in side info
-    // For now, consider buffer with < 5% non-zero bytes after first 1k as silence
-    if (strlen($buffer) < 4096) return true;
-    $sample = substr($buffer, 1024, 4096);
-    $nonZero = 0;
-    for ($i=0; $i<strlen($sample); $i++) {
-        if (ord($sample[$i]) > 16) $nonZero++;
-    }
-    return ($nonZero / strlen($sample)) < 0.08;
-}
-
 function llBuildFfmpegCommand($settings, $detection) {
     $ffmpeg = llFindFfmpeg();
     $bitrate = preg_match('/^\d+k$/', $settings['bitrate'] ?? '') ? $settings['bitrate'] : '128k';
